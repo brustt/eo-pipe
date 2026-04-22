@@ -6,14 +6,13 @@ import numpy as np
 import pytest
 import rasterio as rio
 
-from eo_pipe.io.raster_io import (
-    DEFAULT_WRITER,
-    RasterWriter,
+from eo_pipe.io.raster_io import DEFAULT_READER, DEFAULT_WRITER, RasterData, RasterReader, RasterWriter
+from eo_pipe.steps.raster.calibrate import (
     _build_lut,
     _match_band_integer,
-    downsample_raster,
     hist_match_worker,
 )
+from eo_pipe.steps.raster.resample import downsample_raster
 
 # ---------------------------------------------------------------------------
 # RasterWriter
@@ -95,6 +94,88 @@ class TestRasterWriter:
         writer = RasterWriter(extra={"INTERLEAVE": "PIXEL"})
         opts = writer._creation_options(np.dtype("uint8"))
         assert opts["INTERLEAVE"] == "PIXEL"
+
+    def test_nodata_none_preserves_profile_nodata(self, write_raster, output_dir):
+        """nodata=None must not overwrite the profile's nodata value."""
+        inp = write_raster("src.tif")  # conftest default nodata=0
+        out = output_dir / "out.tif"
+        with rio.open(inp) as src:
+            data = src.read()
+            profile = src.profile.copy()
+        DEFAULT_WRITER.write(out, data, **profile)
+        with rio.open(out) as dst:
+            assert dst.nodata == 0
+
+    def test_nodata_explicit_overrides_profile(self, write_raster, output_dir):
+        """nodata set on the writer must override whatever is in the profile."""
+        inp = write_raster("src.tif")   # uint8, nodata=0 from conftest
+        out = output_dir / "out.tif"
+        writer = RasterWriter(nodata=255.0)  # 255 is valid for uint8
+        with rio.open(inp) as src:
+            data = src.read()
+            profile = src.profile.copy()
+        writer.write(out, data, **profile)
+        with rio.open(out) as dst:
+            assert dst.nodata == 255.0
+
+
+# ---------------------------------------------------------------------------
+# RasterReader
+# ---------------------------------------------------------------------------
+
+
+class TestRasterReader:
+    def test_returns_raster_data(self, single_raster):
+        rdata = DEFAULT_READER.read(single_raster)
+        assert isinstance(rdata, RasterData)
+
+    def test_data_shape(self, single_raster):
+        rdata = DEFAULT_READER.read(single_raster)
+        with rio.open(single_raster) as src:
+            expected = (src.count, src.height, src.width)
+        assert rdata.data.shape == expected
+
+    def test_valid_mask_shape(self, single_raster):
+        rdata = DEFAULT_READER.read(single_raster)
+        with rio.open(single_raster) as src:
+            expected = (src.height, src.width)
+        assert rdata.valid_mask.shape == expected
+        assert rdata.valid_mask.dtype == bool
+
+    def test_nodata_row_marked_invalid(self, nodata_raster):
+        """Top row (value=0=nodata) must be False in valid_mask."""
+        rdata = DEFAULT_READER.read(nodata_raster)
+        assert rdata.has_nodata
+        assert not rdata.valid_mask[0, :].any()    # top row all invalid
+        assert rdata.valid_mask[1:, :].all()        # rest all valid
+
+    def test_fill_value_applied_to_nodata(self, nodata_raster):
+        reader = RasterReader(fill_value=255)
+        rdata = reader.read(nodata_raster)
+        # nodata row should be filled with 255
+        np.testing.assert_array_equal(rdata.data[:, 0, :], 255)
+
+    def test_fill_value_none_preserves_original(self, nodata_raster):
+        reader = RasterReader(fill_value=None)
+        rdata = reader.read(nodata_raster)
+        # nodata row still has original value (0)
+        np.testing.assert_array_equal(rdata.data[:, 0, :], 0)
+
+    def test_no_nodata_has_nodata_false(self, write_raster):
+        data = np.full((1, 16, 16), 128, dtype=np.uint8)
+        inp = write_raster("no_nd.tif", data=data, profile={"count": 1, "nodata": None})
+        rdata = DEFAULT_READER.read(inp)
+        assert not rdata.has_nodata
+
+    def test_profile_matches_source(self, single_raster):
+        rdata = DEFAULT_READER.read(single_raster)
+        with rio.open(single_raster) as src:
+            assert rdata.profile["crs"] == src.crs
+            assert rdata.profile["width"] == src.width
+
+    def test_path_stored(self, single_raster):
+        rdata = DEFAULT_READER.read(single_raster)
+        assert rdata.path == single_raster
 
 
 # ---------------------------------------------------------------------------

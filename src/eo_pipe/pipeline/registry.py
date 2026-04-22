@@ -1,4 +1,4 @@
-from typing import Dict, Type
+from typing import Any, Dict, List, Type
 
 from .base import StepBase
 
@@ -45,7 +45,7 @@ class StepRegistry:
         return step_class
 
     @classmethod
-    def create(cls, name: str, **constructor_params) -> StepBase:
+    def create(cls, name: str, **constructor_params: Any) -> StepBase:
         """Instantiate a registered step with optional constructor parameters.
 
         Args:
@@ -67,6 +67,6 @@ class StepRegistry:
         return cls._registry[name](**constructor_params)
 
     @classmethod
-    def available(cls) -> list:
+    def available(cls) -> List[str]:
         """Return a sorted list of all registered step names."""
         return sorted(cls._registry.keys())

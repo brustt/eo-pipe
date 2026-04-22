@@ -4,109 +4,78 @@ This document collects architectural ideas that go beyond the current implementa
 
 ---
 
-### Notes
-### To do                                                                 
-* keep or remove wrapped function ?                                       
-* homogenize saving : sometimes in Step class, sometime in the function wrapped by the class                                                        
-* Does it could be better to write some callback function, auto run by
-    - pipelineComposition ?                                                    
-* use PathStrategy everywhere                                             
-* make some example in notebooks                                          
-* speed tests over methods and propose some gpu optimization/ multithread
+## Open questions & short-term backlog
 
-## 1. `Persistable` Protocol — separating data from IO
+### Use PathStrategy everywhere
 
-### Motivation
+`RasterizeStep` hardcodes `output_dir / f"{output_name}_{inp.stem}.tif"` instead of using a `PathStrategy`. Inconsistent path naming makes output locations harder to predict and override. Low-cost fix: adopt `PrefixedPathStrategy` in `RasterizeStep`.
 
-Currently each step is responsible for two distinct concerns: processing data and writing it to disk. The `_writer` injection (introduced in `StepBase`) decouples *which* writer is used, but writing still happens inside `execute()`. A `Persistable` protocol would push IO responsibility fully out of steps, making them pure data transforms that are easier to test, compose, and reason about.
+`MergeRasterStep` now uses `NamedPathStrategy` (added to `io/path_utils.py`) — a fixed-name strategy for steps that produce a single output independent of any specific input.
 
-### Design
+### Examples in notebooks
 
-```python
-from typing import Protocol, runtime_checkable
-from pathlib import Path
+Valid, but should wait until the public API (`PipelineComposition`, `add_step`, `run`) is stable. Notebooks go stale quickly if written against a moving interface.
 
-@runtime_checkable
-class Persistable(Protocol):
-    path: Path  # where the output should be saved
+### Performance: threading and GPU
 
-    def flush(self, writer: "RasterWriter") -> Path:
-        """Write data to disk and return the saved path."""
-        ...
-```
+Near-term realistic win: `ThreadedBatch` (already mentioned in `ParallelBatch`'s docstring). The bottleneck in EO pipelines is usually disk I/O, not compute — benchmark before optimising.
 
-Concrete implementations per output type:
-
-```python
-@dataclass
-class RasterOutput:
-    data: np.ndarray
-    path: Path
-    meta: dict  # rasterio profile (crs, transform, dtype, …)
-
-    def flush(self, writer: RasterWriter) -> Path:
-        writer.write(self.path, self.data, **self.meta)
-        return self.path
-
-@dataclass
-class VectorOutput:
-    gdf: gpd.GeoDataFrame
-    path: Path
-
-    def flush(self, writer: RasterWriter) -> Path:  # writer is ignored
-        self.gdf.to_file(self.path)
-        return self.path
-```
-
-`StepResult.outputs` would become `List[Persistable]`. `BatchStrategy.apply()` calls `out.flush(writer)` immediately after each file, so only one output lives in memory at a time:
-
-```python
-class ParallelBatch(BatchStrategy):
-    def apply(self, step, inputs, output_dir, **params):
-        combined = StepResult()
-        for pending in step.execute(inputs, output_dir, **params):
-            path = pending.flush(self._writer)
-            combined.outputs.append(path)
-        return combined
-```
-
-The composition no longer needs to know about data types — it just calls `flush()` on whatever the step returns.
-
-### Why it is not implemented yet
-
-- Requires changing `execute()` to a **generator** (yielding one `Persistable` per file), which is a breaking change to the entire step interface.
-- Steps that use rasterio's windowed reading internally (e.g. `downsample_raster`) already stream efficiently; materialising a full array just to wrap it in `RasterOutput` would undo that.
-- The current `_writer` injection already covers the primary use case (swapping compression, format, COG output) at low cost.
-
-### When to consider it
-
-- When testing steps requires mocking disk writes frequently.
-- When a step needs to produce outputs to different backends (local FS, S3, GCS) within the same run.
-- When introducing a `ThreadedBatch` that processes files concurrently — `Persistable.flush()` provides a natural synchronisation point.
+GPU acceleration (cupy, RAPIDS) is a significant dependency and only beneficial for large arrays at high resolution. At typical working sizes the overhead dominates. Windowed reading (already used internally by `downsample_raster`) is the more impactful streaming optimisation.
 
 ---
 
+## Suggested priority order
+
+1. **PathStrategy everywhere** — `RasterizeStep`, `MergeRasterStep`. *(all earlier prerequisites are resolved)*
+2. **Backend-agnostic writers** — `Persistable.flush()` is already the single write callsite; plugging in a `WriterBackend` is now straightforward.
+3. **Hooks** — independent of the rest; add when observability is needed.
+4. **Streaming `PipelineComposition`** — only if end-to-end latency on single items becomes a requirement; generator `execute()` is a consequence of this, not a prerequisite.
+
+---
+
+### 1- Data I/O Next step: backend-agnostic writers
+
+`Persistable.flush()` is now the single write callsite for all raster outputs. Plugging in a cloud `WriterBackend` (S3, GCS) requires only changing the `RasterWriter` instance injected at composition time — no step code changes. See section 3.
+
+--- 
 ## 2. Generator-based `execute()` for true streaming
 
 ### Motivation
 
-`ParallelBatch` already processes one file at a time by calling `step.run([inp], ...)` in a loop. But `execute()` still collects all outputs into a list before returning. For steps with many outputs, this means all processed arrays are alive until the method returns.
+For steps processing hundreds of large rasters, the concern is that all output arrays would be alive simultaneously before any is written. A generator interface would allow flushing each output as it is produced, keeping at most one array in memory regardless of input count.
 
-A generator interface would allow flushing each output as it is produced:
+### Why memory is already bounded — and why generators don't change that
+
+`ParallelBatch.apply()` already flushes inside the loop:
 
 ```python
-class ClipStep(StepBase):
-    def execute(self, inputs, output_dir, **params):
-        for inp in inputs:
-            # … process …
-            yield RasterOutput(data=out_image, path=out, meta=out_meta)
+for inp in inputs:
+    step_out = step.run([inp], output_dir, **params)
+    combined.outputs.extend(p.flush() for p in step_out.outputs)  # flush immediately
 ```
 
-This pairs naturally with the `Persistable` protocol above — `BatchStrategy` iterates the generator and flushes immediately, keeping at most one array in memory regardless of input count.
+This means at most one `RasterOutput` array is alive per iteration, regardless of how many inputs there are. The loop structure, not the return type, is what bounds memory.
 
-### Trade-off
+**A `return_data: bool` parameter does not improve on this.** The problems with such a flag:
 
-Generator `execute()` is a breaking API change. A transitional approach is to keep the current return type but add an optional `stream_execute()` generator method that `BatchStrategy` prefers when present.
+- `execute()` return type changes at runtime — `StepOutput.outputs` would contain either `RasterOutput` or `FlushedOutput` depending on a caller-supplied flag. The type contract breaks.
+- The threshold (e.g. 8 GB) is unknowable before processing: file size on disk does not equal array size after reprojection, resampling, or type conversion.
+- It mixes IO policy (when to write) into step params, which describe processing, not IO strategy. Steps that genuinely cannot buffer (windowed readers, GDAL operations) already encode that decision at the implementation level by returning `FlushedOutput`.
+
+**Once a step returns `FlushedOutput`, generators add nothing for memory.** N paths in a list are negligible. The only scenario generators improve is when steps are called with `MergeBatch` and return a large number of `RasterOutput` items — but that is a `MergeBatch` design issue (merge steps receive all inputs at once by definition, and their output is typically a single merged raster).
+
+### What generators actually enable: cross-step streaming
+
+Generators become valuable for a *true streaming pipeline* — one where item N from step 1 is fed directly into step 2 before item N+1 starts:
+
+```python
+# Hypothetical StreamingComposition
+for inp in inputs:
+    for step, batch, params in self._steps:
+        inp = step.execute([inp], output_dir, **params)  # next step sees output immediately
+```
+
+This is a fundamentally different execution model from the current batch model. It requires a redesigned `PipelineComposition`, not just a change to the step interface. Implement only if end-to-end latency on single items becomes a demonstrated requirement (e.g. real-time ingestion pipelines).
 
 ---
 
@@ -130,6 +99,10 @@ class RasterWriter:
 ```
 
 This is straightforward once `Persistable.flush()` is the single write callsite — swap the backend on the writer, and all steps pick it up automatically.
+
+### Critique
+
+Confirmed in principle. The earlier prerequisite — a single write callsite — is now satisfied: all raster writes go through `RasterOutput.flush()` → `RasterWriter.write()`. Introducing a `WriterBackend` field on `RasterWriter` is the only change needed; no step or `BatchStrategy` code would change. The remaining open question is API design for streaming writes (rasterio windows vs. full-array), which matters for large COG outputs.
 
 ---
 
@@ -159,6 +132,14 @@ def log_artifacts(step_name, result):
 pipeline.add_hook("after_step", log_artifacts)
 ```
 
-### Scope
+### Critique
 
-Hooks are suitable for observability only. They should never own IO responsibility — writing must remain synchronous and inside the step (or inside `flush()` once `Persistable` is adopted). A hook that triggers a write after `execute()` returns would require all output arrays to survive until the hook runs, recreating the memory problem described above.
+Confirmed for observability. Two additions the design should address:
+
+- **Immutability**: hooks must receive a read-only view of `StepResult`, not a mutable reference. A hook that accidentally mutates `result.outputs` would silently corrupt the pipeline's input chain for subsequent steps. Pass a copy or a frozen view.
+- **Scope boundary**: hooks must never own IO. A hook that triggers a write after `execute()` returns would require all output arrays to survive until the hook fires, recreating the memory problem described in section 1. If the goal is "save after each step", use `Persistable` — not a hook.
+
+
+
+### Logging
+logger is recreated at each step ?

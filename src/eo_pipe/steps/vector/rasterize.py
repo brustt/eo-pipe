@@ -1,13 +1,14 @@
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
 import geopandas as gpd
 import numpy as np
 import rasterio as rio
 import rasterio.features
 
+from eo_pipe.io.output_types import RasterOutput
 from eo_pipe.io.path_utils import PrefixedPathStrategy
-from eo_pipe.pipeline.base import StepBase, StepResult
+from eo_pipe.pipeline.base import StepBase, StepOutput
 from eo_pipe.pipeline.registry import StepRegistry
 from eo_pipe.logging import setup_logger
 
@@ -25,16 +26,17 @@ class RasterizeStep(StepBase):
         fill (float): Background fill value.  Defaults to ``0``.
         all_touched (bool): Rasterize all pixels touched by geometries.
             Defaults to ``True``.
-        output_name (str): Output file stem.  Defaults to ``"rasterized"``.
+        output_name (str): Output file stem prefix.  Defaults to
+            ``"rasterized"``.
     """
 
     name = "rasterize"
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._path_strategy = PrefixedPathStrategy()
 
-    def execute(self, inputs: List[Path], output_dir: Path, **params) -> StepResult:
+    def execute(self, inputs: List[Path], output_dir: Path, **params: Any) -> StepOutput:
         vector_path = Path(params["vector_path"])
         value_column: str = params.get("value_column", "value")
         fill: float = float(params.get("fill", 0))
@@ -45,7 +47,7 @@ class RasterizeStep(StepBase):
 
         outputs = []
         for inp in inputs:
-            out = output_dir / f"{output_name}_{inp.stem}.tif"
+            out = self._path_strategy.resolve(output_name, inp, 0, output_dir)
 
             with rio.open(inp) as src:
                 meta = src.meta.copy()
@@ -53,7 +55,6 @@ class RasterizeStep(StepBase):
                 transform = src.transform
                 shape = (src.height, src.width)
 
-                # Reproject vector to raster CRS if needed
                 if gdf.crs != src.crs:
                     gdf_proj = gdf.to_crs(src.crs)
                 else:
@@ -72,9 +73,12 @@ class RasterizeStep(StepBase):
                     dtype=np.float32,
                 )
 
-            self._writer.write(out, burned[np.newaxis, :, :], **meta)
-
             logger.info(f"Rasterized {vector_path.name} → {out}")
-            outputs.append(out)
+            outputs.append(RasterOutput(
+                data=burned[np.newaxis, :, :],
+                path=out,
+                meta=meta,
+                writer=self._writer,
+            ))
 
-        return StepResult(outputs=outputs)
+        return StepOutput(outputs=outputs)

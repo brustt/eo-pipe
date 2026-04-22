@@ -6,6 +6,7 @@ import geopandas as gpd
 import pytest
 from shapely.geometry import box
 
+from eo_pipe.io.output_types import GpkgFormat, ParquetFormat, ShapefileFormat
 from eo_pipe.steps.vector.merge import MergeVectorStep
 
 
@@ -17,14 +18,16 @@ def _write_shp(path: Path, geoms, crs="EPSG:4326") -> Path:
 
 
 class TestMergeVectorStep:
-    def test_merge_two_shapefiles(self, tmp_path, output_dir):
+    def test_merge_two_shapefiles_default_gpkg(self, tmp_path, output_dir):
+        """Default format is GPKG."""
         a = _write_shp(tmp_path / "a.shp", [box(0, 0, 1, 1)])
         b = _write_shp(tmp_path / "b.shp", [box(1, 0, 2, 1)])
 
         step = MergeVectorStep()
-        result = step.execute([a, b], output_dir)
+        result = step.execute([a, b], output_dir).flush_all()
 
         assert len(result.outputs) == 1
+        assert result.outputs[0].suffix == ".gpkg"
         assert result.outputs[0].exists()
 
         merged = gpd.read_file(result.outputs[0])
@@ -35,15 +38,41 @@ class TestMergeVectorStep:
         b = _write_shp(tmp_path / "b.shp", [box(1, 0, 2, 1)])
 
         step = MergeVectorStep()
-        result = step.execute([a, b], output_dir, output_name="combined")
-        assert result.outputs[0].name == "combined.shp"
+        result = step.execute([a, b], output_dir, output_name="combined").flush_all()
+        assert result.outputs[0].stem == "combined"
+
+    def test_shapefile_format(self, tmp_path, output_dir):
+        a = _write_shp(tmp_path / "a.shp", [box(0, 0, 1, 1)])
+        b = _write_shp(tmp_path / "b.shp", [box(1, 0, 2, 1)])
+
+        step = MergeVectorStep()
+        result = step.execute(
+            [a, b], output_dir, output_name="out", fmt=ShapefileFormat()
+        ).flush_all()
+        assert result.outputs[0].suffix == ".shp"
+        assert result.outputs[0].exists()
+
+    def test_parquet_format(self, tmp_path, output_dir):
+        pytest.importorskip("pyarrow", reason="pyarrow not installed")
+        a = _write_shp(tmp_path / "a.shp", [box(0, 0, 1, 1)])
+        b = _write_shp(tmp_path / "b.shp", [box(1, 0, 2, 1)])
+
+        step = MergeVectorStep()
+        result = step.execute(
+            [a, b], output_dir, output_name="out", fmt=ParquetFormat()
+        ).flush_all()
+        assert result.outputs[0].suffix == ".parquet"
+        assert result.outputs[0].exists()
+
+        gdf = gpd.read_parquet(result.outputs[0])
+        assert len(gdf) == 2
 
     def test_dissolve_produces_one_geometry(self, tmp_path, output_dir):
         a = _write_shp(tmp_path / "a.shp", [box(0, 0, 1, 1)])
         b = _write_shp(tmp_path / "b.shp", [box(0.5, 0, 1.5, 1)])
 
         step = MergeVectorStep()
-        result = step.execute([a, b], output_dir, dissolve=True)
+        result = step.execute([a, b], output_dir, dissolve=True).flush_all()
 
         merged = gpd.read_file(result.outputs[0])
         assert len(merged) == 1

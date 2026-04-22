@@ -1,8 +1,9 @@
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
+from eo_pipe.io.output_types import FlushedOutput
 from eo_pipe.io.path_utils import PrefixedPathStrategy
-from eo_pipe.pipeline.base import StepBase, StepResult
+from eo_pipe.pipeline.base import StepBase, StepOutput
 from eo_pipe.pipeline.registry import StepRegistry
 
 
@@ -19,11 +20,11 @@ class SieveStep(StepBase):
 
     name = "sieve"
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._path_strategy = PrefixedPathStrategy()
 
-    def execute(self, inputs: List[Path], output_dir: Path, **params) -> StepResult:
+    def execute(self, inputs: List[Path], output_dir: Path, **params: Any) -> StepOutput:
         threshold = int(params.get("threshold", 20))
         connectedness = int(params.get("connectedness", 8))
 
@@ -38,6 +39,6 @@ class SieveStep(StepBase):
                 threshold=threshold,
                 connectedness=connectedness,
             )
-            outputs.append(out)
+            outputs.append(FlushedOutput(out))
 
-        return StepResult(outputs=outputs)
+        return StepOutput(outputs=outputs)

@@ -28,10 +28,10 @@ console = Console(theme=custom_theme)
 class RichRotatingFileHandler(RotatingFileHandler):
     """File handler that strips rich markup from log messages."""
 
-    def emit(self, record):
-        from rich.markup import remove
+    def emit(self, record: logging.LogRecord) -> None:
+        from rich.markup import escape
 
-        record.msg = remove(str(record.msg))
+        record.msg = escape(str(record.msg))
         super().emit(record)
 
 
@@ -89,17 +89,17 @@ def setup_logger(
     return logger
 
 
-default_logger = setup_logger("eo_pipe")
+# default_logger = setup_logger("eo_pipe")
 
 
-def log_step_start(logger: logging.Logger, step_name: str, **kwargs) -> None:
+def log_step_start(logger: logging.Logger, step_name: str, **kwargs: object) -> None:
     """Log the start of a processing step."""
     params = " ".join(f"{k}={v}" for k, v in kwargs.items())
     logger.info(f"[bold blue]Starting {step_name}[/] {params}")
 
 
 def log_step_complete(
-    logger: logging.Logger, step_name: str, duration: float = None
+    logger: logging.Logger, step_name: str, duration: Optional[float] = None
 ) -> None:
     """Log the completion of a processing step."""
     duration_str = f" ([green]{duration:.2f}s[/])" if duration is not None else ""
@@ -107,7 +107,7 @@ def log_step_complete(
 
 
 def log_error(
-    logger: logging.Logger, message: str, error: Exception = None
+    logger: logging.Logger, message: str, error: Optional[Exception] = None
 ) -> None:
     """Log an error with optional exception details."""
     if error:

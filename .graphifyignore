@@ -1,0 +1,74 @@
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# uv specific
+.uv/
+uv.lock
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# mypy
+.*_cache/
+
+
+.openspec/
+.claude/
+.agent/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Git
+.git/
+.gitignore
+
+# Data
+data/
+datasets/
+*.tif
+*.tiff
+*.img
+*.nc
+*.h5
+*.hdf5
+*.las
+*.laz
+*.zip
+
+# Outputs / experiments
+outputs/
+results/
+runs/
+checkpoints/
+models/
+
+# Temporary
+tmp/
+temp/
+*.tmp
+
+# Misc
+*.bak
+*.swp

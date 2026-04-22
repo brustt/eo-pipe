@@ -5,8 +5,28 @@ build/
 dist/
 wheels/
 *.egg-info
+.pytest_cache/
+.coverage
 
 # Virtual environments
 .venv
 
 py.typed
+
+
+.claude
+.mypy_cache
+.planning
+.agent
+.agent/
+.cursor
+.cursorrules
+.env
+.idea
+
+docs/*
+data/*
+
+CLAUDE.md
+
+graphify-out/

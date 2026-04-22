@@ -39,13 +39,13 @@ def _make_adjacent_rasters(write_raster):
 class TestMergeRasterStep:
     def test_single_input_passthrough(self, single_raster, output_dir):
         step = MergeRasterStep()
-        result = step.execute([single_raster], output_dir)
+        result = step.execute([single_raster], output_dir).flush_all()
         assert result.outputs == [single_raster]
 
     def test_two_rasters_produce_one_output(self, write_raster, output_dir):
         inputs = _make_adjacent_rasters(write_raster)
         step = MergeRasterStep()
-        result = step.execute(inputs, output_dir, to_cog=False)
+        result = step.execute(inputs, output_dir, to_cog=False).flush_all()
 
         assert len(result.outputs) == 1
         assert result.outputs[0].exists()
@@ -53,7 +53,7 @@ class TestMergeRasterStep:
     def test_merged_wider_than_inputs(self, write_raster, output_dir):
         inputs = _make_adjacent_rasters(write_raster)
         step = MergeRasterStep()
-        result = step.execute(inputs, output_dir, to_cog=False)
+        result = step.execute(inputs, output_dir, to_cog=False).flush_all()
 
         with rio.open(result.outputs[0]) as dst:
             assert dst.width > 64  # merged should be wider than either tile
@@ -61,7 +61,7 @@ class TestMergeRasterStep:
     def test_output_name_param(self, write_raster, output_dir):
         inputs = _make_adjacent_rasters(write_raster)
         step = MergeRasterStep()
-        result = step.execute(inputs, output_dir, output_name="my_merge", to_cog=False)
+        result = step.execute(inputs, output_dir, output_name="my_merge", to_cog=False).flush_all()
         assert result.outputs[0].name == "my_merge.tif"
 
     def test_step_name(self):

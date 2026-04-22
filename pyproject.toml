@@ -1,6 +1,6 @@
 [project]
 name = "eo-pipe"
-version = "0.1.0"
+version = "0.1.1"
 description = "Agnostic Earth Observation processing pipeline library"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,6 +23,8 @@ dependencies = [
     "gdal==3.12.2",
     "mypy>=1.19.1",
     "gdal-utils==3.12.2.0",
+    "pyarrow>=23.0.1",
+    "rootutils>=1.0.7",
 ]
 
 [dependency-groups]
@@ -38,6 +40,46 @@ no-build-isolation-package = ["gdal", "gdal-utils"]
 
 [tool.uv.extra-build-dependencies]
 gdal = ["setuptools", "numpy"]
+
+[tool.mypy]
+python_version = "3.12"
+# Relax strict flags that fire on generated/third-party code
+disallow_untyped_decorators = false   # StepRegistry.register decorates user classes
+warn_return_any = false               # some rasterio calls return Any
+ignore_missing_imports = true
+
+
+[[tool.mypy.overrides]]
+# Third-party packages without type stubs or py.typed markers.
+# Each is listed explicitly so mypy still catches real missing imports.
+module = [
+    "rasterio",
+    "rasterio.*",
+    "geopandas",
+    "geopandas.*",
+    "fiona",
+    "fiona.*",
+    "scipy",
+    "scipy.*",
+    "skimage",
+    "skimage.*",
+    "shapely",
+    "shapely.*",
+    "pandas",
+    "pandas.*",
+    "jenkspy",
+    "rich",
+    "rich.*",
+    "osgeo",
+    "osgeo.*",
+    "osgeo_utils",
+    "osgeo_utils.*",
+    "rio_cogeo",
+    "rio_cogeo.*",
+    "pyarrow",
+    "pyarrow.*",
+]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

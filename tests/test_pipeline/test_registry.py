@@ -2,8 +2,9 @@
 
 import pytest
 
+from eo_pipe.io.output_types import FlushedOutput
 from eo_pipe.io.raster_io import RasterWriter
-from eo_pipe.pipeline.base import StepBase, StepResult
+from eo_pipe.pipeline.base import StepBase, StepOutput, StepResult
 from eo_pipe.pipeline.registry import StepRegistry
 
 
@@ -26,7 +27,7 @@ class TestStepRegistry:
         class _FakeStep(StepBase):
             name = "_fake_isolated"
             def execute(self, inputs, output_dir, **params):
-                return StepResult()
+                return StepOutput()
 
         step = _IsolatedRegistry.create("_fake_isolated")
         assert isinstance(step, _FakeStep)

@@ -1,11 +1,11 @@
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
 import geopandas as gpd
 import pandas as pd
 
-from eo_pipe.io.vector_io import save_vector
-from eo_pipe.pipeline.base import StepBase, StepResult
+from eo_pipe.io.output_types import GpkgFormat, VectorFormat, VectorOutput
+from eo_pipe.pipeline.base import StepBase, StepOutput
 from eo_pipe.pipeline.registry import StepRegistry
 from eo_pipe.logging import setup_logger
 
@@ -20,20 +20,32 @@ class MergeVectorStep(StepBase):
 
     Parameters (passed via ``**params``):
         output_name (str): Stem of the output file.  Defaults to ``"merged"``.
-        driver (str): OGR driver.  Defaults to ``"ESRI Shapefile"``.
+        fmt (:class:`~eo_pipe.io.output_types.VectorFormat`): Format strategy
+            controlling the file extension and write implementation.
+            Defaults to :class:`~eo_pipe.io.output_types.GpkgFormat`.
         dissolve (bool): If ``True``, attempt a unary union of all geometries
             before saving.  Defaults to ``False``.
+
+    Example::
+
+        from eo_pipe.io.output_types import ParquetFormat
+
+        pipeline.add_step(
+            "merge_vector",
+            MergeBatch(),
+            output_name="combined",
+            fmt=ParquetFormat(),
+        )
     """
 
     name = "merge_vector"
 
-    def execute(self, inputs: List[Path], output_dir: Path, **params) -> StepResult:
+    def execute(self, inputs: List[Path], output_dir: Path, **params: Any) -> StepOutput:
         output_name = params.get("output_name", "merged")
-        driver = params.get("driver", "ESRI Shapefile")
+        fmt: VectorFormat = params.get("fmt", GpkgFormat())
         dissolve = bool(params.get("dissolve", False))
 
-        ext = ".gpkg" if driver == "GPKG" else ".shp"
-        output_path = output_dir / f"{output_name}{ext}"
+        output_path = output_dir / f"{output_name}{fmt.extension}"
 
         gdfs = []
         for p in inputs:
@@ -55,7 +67,7 @@ class MergeVectorStep(StepBase):
 
         if dissolve:
             try:
-                union_geom = combined.geometry.unary_union
+                union_geom = combined.geometry.union_all()
                 combined = gpd.GeoDataFrame(
                     {"geometry": [union_geom]}, crs=gdfs[0].crs
                 )
@@ -63,5 +75,4 @@ class MergeVectorStep(StepBase):
             except Exception as e:
                 logger.warning(f"Dissolve failed, keeping concatenated result: {e}")
 
-        save_vector(combined, output_path, driver=driver)
-        return StepResult(outputs=[output_path])
+        return StepOutput(outputs=[VectorOutput(gdf=combined, path=output_path, fmt=fmt)])

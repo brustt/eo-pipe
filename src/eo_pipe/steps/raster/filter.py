@@ -1,18 +1,22 @@
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
 import numpy as np
-import rasterio as rio
 from scipy.ndimage import median_filter
 
+from eo_pipe.io.output_types import RasterOutput
 from eo_pipe.io.path_utils import PrefixedPathStrategy
-from eo_pipe.pipeline.base import StepBase, StepResult
+from eo_pipe.pipeline.base import StepBase, StepOutput
 from eo_pipe.pipeline.registry import StepRegistry
 
 
 @StepRegistry.register
 class FilterStep(StepBase):
     """Apply a spatial filter to each input raster.
+
+    Nodata pixels are excluded from the filter computation: after filtering,
+    any pixel position that was marked as nodata in the source is restored to
+    its original value so the filter does not bleed across nodata boundaries.
 
     Parameters (passed via ``**params``):
         method (str): Filter algorithm.  Currently only ``"median"``
@@ -24,11 +28,11 @@ class FilterStep(StepBase):
 
     _METHODS = {"median": "_apply_median"}
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._path_strategy = PrefixedPathStrategy()
 
-    def execute(self, inputs: List[Path], output_dir: Path, **params) -> StepResult:
+    def execute(self, inputs: List[Path], output_dir: Path, **params: Any) -> StepOutput:
         method = params.get("method", "median")
         kernel_size = int(params.get("kernel_size", 15))
 
@@ -41,20 +45,25 @@ class FilterStep(StepBase):
         outputs = []
         for inp in inputs:
             out = self._path_strategy.resolve(self.name, inp, 0, output_dir)
-            self._filter_raster(inp, out, method, kernel_size)
-            outputs.append(out)
+            pending = self._build_output(inp, out, method, kernel_size)
+            outputs.append(pending)
 
-        return StepResult(outputs=outputs)
+        return StepOutput(outputs=outputs)
 
-    def _filter_raster(
+    def _build_output(
         self, inp: Path, out: Path, method: str, kernel_size: int
-    ) -> None:
-        with rio.open(inp) as src:
-            data = src.read()
-            meta = src.meta.copy()
+    ) -> RasterOutput:
+        rdata = self._reader.read(inp)
+        # TODO: implement a factory for filters methods
+        filtered = self._apply_median(rdata.data, kernel_size)
 
-        filtered = self._apply_median(data, kernel_size)
-        self._writer.write(output_file=out, data=filtered, **meta)
+        # Restore original values at nodata positions so the filter kernel
+        # does not bleed masked values into valid neighbours.
+        if rdata.has_nodata:
+            for b in range(filtered.shape[0]):
+                filtered[b][~rdata.valid_mask] = rdata.data[b][~rdata.valid_mask]
+
+        return RasterOutput(data=filtered, path=out, meta=rdata.profile, writer=self._writer)
 
     @staticmethod
     def _apply_median(data: np.ndarray, kernel_size: int) -> np.ndarray:

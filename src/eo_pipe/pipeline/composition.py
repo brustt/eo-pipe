@@ -7,7 +7,6 @@ from .base import StepBase, StepResult
 from .batch import BatchStrategy, ParallelBatch
 from .context import PipelineContext
 from .registry import StepRegistry
-from eo_pipe.io.path_utils import PrefixedPathStrategy, PathStrategy
 from eo_pipe.io.raster_io import DEFAULT_WRITER, RasterWriter
 from eo_pipe.logging import setup_logger
 
@@ -47,13 +46,11 @@ class PipelineComposition:
         self,
         workspace: Optional[Path] = None,
         metadata: Optional[Dict[str, Any]] = None,
-        path_strategy: Optional[PathStrategy] = None,
         writer: Optional[RasterWriter] = None,
     ) -> None:
         self._steps: List[Tuple[StepBase, BatchStrategy, Dict[str, Any]]] = []
         self._workspace = workspace
         self._metadata = metadata or {}
-        self._path_strategy = path_strategy or PrefixedPathStrategy()
         self._writer = writer or DEFAULT_WRITER
 
     # ------------------------------------------------------------------
@@ -63,8 +60,8 @@ class PipelineComposition:
     def add_step(
         self,
         step: Union[str, StepBase],
-        batch: BatchStrategy = None,
-        **params,
+        batch: Optional[BatchStrategy] = None,
+        **params: Any,
     ) -> "PipelineComposition":
         """Append a step to the composition.
 

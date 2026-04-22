@@ -1,21 +1,16 @@
-from .path_utils import IndexedPathStrategy, PathStrategy, PrefixedPathStrategy
-from .raster_io import (
-    RasterWriter,
-    DEFAULT_WRITER,
-    create_hillshade,
-    downsample_raster,
-    hist_match_worker,
-)
+from .path_utils import IndexedPathStrategy, NamedPathStrategy, PathStrategy, PrefixedPathStrategy
+from .raster_io import DEFAULT_READER, DEFAULT_WRITER, RasterData, RasterReader, RasterWriter
 from .vector_io import save_vector
 
 __all__ = [
     "RasterWriter",
     "DEFAULT_WRITER",
+    "RasterReader",
+    "RasterData",
+    "DEFAULT_READER",
     "save_vector",
-    "downsample_raster",
-    "hist_match_worker",
-    "create_hillshade",
     "PathStrategy",
     "PrefixedPathStrategy",
     "IndexedPathStrategy",
+    "NamedPathStrategy",
 ]

@@ -26,14 +26,14 @@ class TestSieveStep:
     def test_output_exists(self, write_raster, output_dir):
         inp = _make_classified(write_raster)
         step = SieveStep()
-        result = step.execute([inp], output_dir, threshold=5, connectedness=4)
+        result = step.execute([inp], output_dir, threshold=5, connectedness=4).flush_all()
         assert result.outputs[0].exists()
 
     def test_small_region_removed(self, write_raster, output_dir):
         """Isolated 2-pixel region should be removed with threshold=5."""
         inp = _make_classified(write_raster)
         step = SieveStep()
-        result = step.execute([inp], output_dir, threshold=5, connectedness=4)
+        result = step.execute([inp], output_dir, threshold=5, connectedness=4).flush_all()
 
         with rio.open(result.outputs[0]) as dst:
             out_data = dst.read(1)
@@ -44,7 +44,7 @@ class TestSieveStep:
         """Main region (value=1, ~4094 pixels) must survive sieving."""
         inp = _make_classified(write_raster)
         step = SieveStep()
-        result = step.execute([inp], output_dir, threshold=5, connectedness=4)
+        result = step.execute([inp], output_dir, threshold=5, connectedness=4).flush_all()
 
         with rio.open(result.outputs[0]) as dst:
             out_data = dst.read(1)
@@ -54,7 +54,7 @@ class TestSieveStep:
     def test_default_params(self, write_raster, output_dir):
         inp = _make_classified(write_raster)
         step = SieveStep()
-        result = step.execute([inp], output_dir)
+        result = step.execute([inp], output_dir).flush_all()
         assert result.outputs[0].exists()
 
     def test_step_name(self):

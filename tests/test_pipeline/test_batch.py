@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from eo_pipe.pipeline.base import StepBase, StepResult
+from eo_pipe.io.output_types import FlushedOutput
+from eo_pipe.pipeline.base import StepBase, StepOutput, StepResult
 from eo_pipe.pipeline.batch import MergeBatch, ParallelBatch, SingleBatch
 
 
@@ -22,8 +23,8 @@ class _SpyStep(StepBase):
 
     def execute(self, inputs, output_dir, **params):
         self.calls.append(list(inputs))
-        return StepResult(
-            outputs=[output_dir / f"out_{len(self.calls)}.tif"],
+        return StepOutput(
+            outputs=[FlushedOutput(output_dir / f"out_{len(self.calls)}.tif")],
             metadata={"call": len(self.calls)},
         )
 
