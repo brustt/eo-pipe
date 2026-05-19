@@ -52,6 +52,15 @@ class OTBStepBase(StepBase):
     param_in: ClassVar[str] = "in"
     param_out: ClassVar[str] = "out"
 
+    _COMPRESS_SUFFIX = (
+        "?&gdal:co:COMPRESS=DEFLATE"
+        "&gdal:co:BIGTIFF=YES"
+        "&gdal:co:NUM_THREADS=ALL_CPUS"
+        "&gdal:co:TILED=YES"
+        "&gdal:co:BLOCKXSIZE=256"
+        "&gdal:co:BLOCKYSIZE=256"
+    )
+
     def is_available(self) -> bool:
         return shutil.which(f"otbcli_{self.otb_app}") is not None
 
@@ -114,7 +123,7 @@ class OTBStepBase(StepBase):
         otb_params[self.param_out] = self._format_otb_output(out_path, **params)
 
         cmd = self._build_cmd(cmd_name, otb_params)
-        proc = subprocess.run(cmd, capture_output=True, text=True)  # noqa: S603
+        proc = subprocess.run(cmd, capture_output=False, text=True)  # noqa: S603
         if proc.returncode != 0:
             raise RuntimeError(
                 f"OTB '{self.otb_app}' failed (exit {proc.returncode}):\n{proc.stderr}"

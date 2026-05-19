@@ -160,6 +160,60 @@ class TestPipelineComposition:
         assert ctx.inputs[0].exists()
 
     # ------------------------------------------------------------------ #
+    # Preflight checks                                                     #
+    # ------------------------------------------------------------------ #
+
+    def test_preflight_passes_when_all_available(self, single_raster, tmp_path):
+        out_dir = tmp_path / "out"
+        # resample is always available (pure Python) — should not raise
+        ctx = (
+            PipelineComposition()
+            .add_step("resample", ParallelBatch(), target_resolution=0.02)
+            .run(inputs=[single_raster], output_dir=out_dir, preflight=True)
+        )
+        assert ctx.inputs[0].exists()
+
+    def test_preflight_raises_when_step_unavailable(self, single_raster, tmp_path):
+        from unittest.mock import patch
+        from eo_pipe.pipeline.base import StepBase
+
+        with patch.object(StepBase, "is_available", return_value=False):
+            with pytest.raises(RuntimeError, match="preflight failed"):
+                (
+                    PipelineComposition()
+                    .add_step("resample", ParallelBatch(), target_resolution=0.02)
+                    .run(inputs=[single_raster], preflight=True)
+                )
+
+    def test_preflight_false_skips_availability_check(self, single_raster, tmp_path):
+        from unittest.mock import patch
+        from eo_pipe.pipeline.base import StepBase
+
+        out_dir = tmp_path / "out"
+        with patch.object(StepBase, "is_available", return_value=False):
+            # preflight=False → no RuntimeError despite unavailable step
+            ctx = (
+                PipelineComposition()
+                .add_step("resample", ParallelBatch(), target_resolution=0.02)
+                .run(inputs=[single_raster], output_dir=out_dir, preflight=False)
+            )
+        assert ctx.inputs[0].exists()
+
+    def test_preflight_error_lists_all_unavailable_steps(self, single_raster, tmp_path):
+        from unittest.mock import patch
+        from eo_pipe.pipeline.base import StepBase
+
+        with patch.object(StepBase, "is_available", return_value=False):
+            with pytest.raises(RuntimeError, match="resample") as exc_info:
+                (
+                    PipelineComposition()
+                    .add_step("resample", ParallelBatch(), target_resolution=0.02)
+                    .add_step("filter", ParallelBatch(), method="median", kernel_size=3)
+                    .run(inputs=[single_raster], preflight=True)
+                )
+            assert "filter" in str(exc_info.value)
+
+    # ------------------------------------------------------------------ #
     # Empty composition                                                    #
     # ------------------------------------------------------------------ #
 

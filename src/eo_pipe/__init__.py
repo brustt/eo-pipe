@@ -3,6 +3,8 @@
 # Import steps to trigger self-registration with StepRegistry
 import eo_pipe.steps  # noqa: F401
 
+from eo_pipe.steps.otb import OTBStepBase
+
 from eo_pipe.io.output_types import (
     FlushedOutput,
     GpkgFormat,
@@ -36,6 +38,8 @@ __all__ = [
     "ParallelBatch",
     "MergeBatch",
     "SingleBatch",
+    # OTB
+    "OTBStepBase",
     # IO output types
     "Persistable",
     "RasterOutput",

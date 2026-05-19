@@ -80,18 +80,6 @@ class OrthoRectifyStep(OTBStepBase):
     param_in = "io.in"
     param_out = "io.out"
 
-    _COMPRESS_SUFFIX = (
-        "?&gdal:co:COMPRESS=DEFLATE"
-        "&gdal:co:TILED=YES"
-        "&gdal:co:BLOCKXSIZE=512"
-        "&gdal:co:BLOCKYSIZE=512"
-    )
-
-    def _format_otb_output(self, out_path: Path, **params: Any) -> str:
-        if params.get("compress", True):
-            return str(out_path) + self._COMPRESS_SUFFIX
-        return str(out_path)
-
     def build_otb_params(
         self,
         inputs: List[Path],

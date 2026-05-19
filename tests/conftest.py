@@ -11,6 +11,14 @@ Default raster spec:
     - nodata: 0
 """
 
+import os
+
+# OTB ships a bundled (older) PROJ database and sets PROJ_LIB/PROJ_DATA in its
+# env profile.  Clear them before PROJ initialises its database context so
+# rasterio/pyproj always use the system PROJ installation.
+os.environ.pop("PROJ_LIB", None)
+os.environ.pop("PROJ_DATA", None)
+
 from pathlib import Path
 from typing import Callable, Dict, Optional
 

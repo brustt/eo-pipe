@@ -20,6 +20,13 @@ class SieveStep(StepBase):
 
     name = "sieve"
 
+    def is_available(self) -> bool:
+        try:
+            import osgeo_utils.gdal_sieve  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._path_strategy = PrefixedPathStrategy()

@@ -50,18 +50,6 @@ class SARCalibrationStep(OTBStepBase):
     name = "sar_calibrate"
     otb_app = "SARCalibration"
 
-    _COMPRESS_SUFFIX: ClassVar[str] = (
-        "?&gdal:co:COMPRESS=DEFLATE"
-        "&gdal:co:TILED=YES"
-        "&gdal:co:BLOCKXSIZE=512"
-        "&gdal:co:BLOCKYSIZE=512"
-    )
-
-    def _format_otb_output(self, out_path: Path, **params: Any) -> str:
-        if params.get("compress", True):
-            return str(out_path) + self._COMPRESS_SUFFIX
-        return str(out_path)
-
     def build_otb_params(
         self,
         inputs: List[Path],
@@ -73,7 +61,6 @@ class SARCalibrationStep(OTBStepBase):
         Expected keys in ``params``:
             lut (str): Calibration LUT name. Default: ``"sigma"``.
             removenoise (bool): Enable thermal noise removal. Default: ``False``.
-            ram_mb (int): OTB RAM budget in MB. Default: ``256``.
 
         Returns:
             OTB parameter dict (without the output key).
@@ -91,11 +78,11 @@ class SARCalibrationStep(OTBStepBase):
             )
 
         removenoise: bool = bool(params.get("removenoise", False))
-        ram_mb: int = int(params.get("ram_mb", 256))
+        ram_mb: int = int(params.get("ram_mb", 1024))
 
         return {
             self.param_in: str(inputs[0]),
             "lut": lut,
             "removenoise": removenoise,
-            "opt.ram": ram_mb,
+            "ram": ram_mb,
         }

@@ -40,13 +40,18 @@ PROJECT_ROOT = rootutils.find_root(search_from=__file__, indicator="pyproject.to
 DATA_DIR = PROJECT_ROOT.parent.parent / "data"
 
 S1_TILES: list[Path] = [
-    DATA_DIR / "S1" / "S1C_IW_GRDH_1SDV_20260211T060734_20260211T060759_006304_00CABF_54BF/measurement" / "s1c-iw-grd-vh-20260211t060734-20260211t060759-006304-00cabf-003.tiff",
-    DATA_DIR / "S1" / "S1C_IW_GRDH_1SDV_20260211T060734_20260211T060759_006304_00CABF_54BF/measurement" / "s1c-iw-grd-vv-20260211t060734-20260211t060759-006304-00cabf-001.tiff",
+    DATA_DIR / "S1" / "S1C_IW_GRDH_1SDV_20260211T060734_20260211T060759_006304_00CABF_54BF/measurement" / "s1c-iw-grd-vh-20260211t060734-20260211t060759-006304-00cabf-002.tiff",
+    #DATA_DIR / "S1" / "S1C_IW_GRDH_1SDV_20260211T060734_20260211T060759_006304_00CABF_54BF/measurement" / "s1c-iw-grd-vv-20260211t060734-20260211t060759-006304-00cabf-001.tiff",
 ]
 
-REFERENCE: Path = DATA_DIR / "S2" / "S2C_MSIL2A_20260218T105111_N0512_R051_T31TCK_20260218T145711_RGB_4326.tif"
+S1_TILES_CALIBRATED: list[Path] = [
+    DATA_DIR / "interim" / "s1_preprocess" / "2026-05-19_10-57-46" / "00_sar_calibrate" / "sar_calibrate_s1c-iw-grd-vh-20260211t060734-20260211t060759-006304-00cabf-002.tiff",
+    #DATA_DIR / "interim" / "s1_preprocess" / "2026-05-19_10-57-46" / "00_sar_calibrate" / "sar_calibrate_s1c-iw-grd-vv-20260211t060734-20260211t060759-006304-00cabf-001.tiff",
+]
 
-STUDY_AREA: Optional[Path] = DATA_DIR / "study_area_lot.gpkg"
+REFERENCE: Path = DATA_DIR / "S2" / "S2B_MSIL2A_20250618T104619_N0511_R051_T31TCK_20250618T134459_RGB_4326.tif"
+
+STUDY_AREA: Optional[Path] = DATA_DIR / "lot_dpt.gpkg"
 
 DEM_DIR: Optional[Path] = DATA_DIR / "SRTM_30_hgt"
 
@@ -183,28 +188,28 @@ def run_full_pipeline(workspace: Path) -> None:
 
     steps = (
         PipelineComposition(workspace=workspace)
-        .add_step(
-            "sar_calibrate",
-            ParallelBatch(),
-            lut=LUT,
-            removenoise=REMOVENOISE,
-            ram_mb=RAM_MB,
-        )
+        # .add_step(
+        #     "sar_calibrate",
+        #     ParallelBatch(),
+        #     lut=LUT,
+        #     removenoise=REMOVENOISE,
+        #     ram_mb=RAM_MB,
+        # )
         .add_step(
             "sar_cut_borders",
             ParallelBatch(),
             ram_mb=RAM_MB,
         )
-        .add_step(
-            "orthorectify",
-            ParallelBatch(),
-            ref=REFERENCE,
-            interpolator=INTERPOLATOR,
-            elev_dem=DEM_DIR,
-            elev_geoid=GEOID_FILE,
-            grid_spacing=GRID_SPACING,
-            ram_mb=RAM_MB,
-        )
+        # .add_step(
+        #     "orthorectify",
+        #     ParallelBatch(),
+        #     ref=REFERENCE,
+        #     interpolator=INTERPOLATOR,
+        #     elev_dem=DEM_DIR,
+        #     elev_geoid=GEOID_FILE,
+        #     grid_spacing=GRID_SPACING,
+        #     ram_mb=RAM_MB,
+        # )
     )
 
     if STUDY_AREA is not None:

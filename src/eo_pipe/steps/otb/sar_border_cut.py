@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -13,6 +14,8 @@ from eo_pipe.io.output_types import FlushedOutput
 from eo_pipe.pipeline.base import StepOutput
 from eo_pipe.pipeline.registry import StepRegistry
 from eo_pipe.steps.otb.base import OTBStepBase
+
+logger = logging.getLogger(__name__)
 
 
 def _detect_s1_borders(path: Path) -> Tuple[int, int, int]:
@@ -84,13 +87,6 @@ class SARBorderCutStep(OTBStepBase):
     name = "sar_cut_borders"
     otb_app = "ResetMargin"
 
-    _COMPRESS_SUFFIX = (
-        "?&gdal:co:COMPRESS=DEFLATE"
-        "&gdal:co:TILED=YES"
-        "&gdal:co:BLOCKXSIZE=512"
-        "&gdal:co:BLOCKYSIZE=512"
-    )
-
     def execute(
         self,
         inputs: List[Path],
@@ -112,16 +108,11 @@ class SARBorderCutStep(OTBStepBase):
             tx, ty_start, ty_end = _detect_s1_borders(inputs[0])
 
         if tx == 0 and ty_start == 0 and ty_end == 0:
-            # No margins — passthrough without calling OTB
+            logger.warning("No S1 margins detected — passthrough without calling OTB ResetMargin")
             return StepOutput(outputs=[FlushedOutput(inputs[0])])
 
         merged = {**params, "threshold_x": tx, "threshold_y_start": ty_start, "threshold_y_end": ty_end}
         return super().execute(inputs, output_dir, **merged)
-
-    def _format_otb_output(self, out_path: Path, **params: Any) -> str:
-        if params.get("compress", True):
-            return str(out_path) + self._COMPRESS_SUFFIX
-        return str(out_path)
 
     def build_otb_params(
         self,
@@ -135,12 +126,11 @@ class SARBorderCutStep(OTBStepBase):
         be present in ``params`` — they are injected by :meth:`execute` before
         this method is called.
         """
-        ram_mb: int = int(params.get("ram_mb", 256))
 
         return {
             self.param_in: str(inputs[0]),
             "threshold.x": int(params["threshold_x"]),
             "threshold.y.start": int(params["threshold_y_start"]),
             "threshold.y.end": int(params["threshold_y_end"]),
-            "opt.ram": ram_mb,
+            "ram": params.get("ram_mb", 256),
         }
