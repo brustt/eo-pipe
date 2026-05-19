@@ -17,32 +17,28 @@ from eo_pipe.steps.otb.base import OTBStepBase
 
 logger = logging.getLogger(__name__)
 
+# S1 IW GRD margin constants (from S1Tiling / CNES reference implementation)
+_RANGE_CUT   = 1000   # pixels zeroed on left + right sides
+_AZIMUTH_CUT = 1600   # rows zeroed at top + bottom when azimuth border detected
+_NODATA_THR  = _RANGE_CUT * 2  # zero-pixel count threshold for azimuth detection
+
 
 def _detect_s1_borders(path: Path) -> Tuple[int, int, int]:
-    """Read first and last image rows to detect S1 IW GRD zero-value margins.
+    """Detect S1 IW GRD azimuth margins using fixed S1Tiling constants.
 
-    Returns:
-        ``(threshold_x, threshold_y_start, threshold_y_end)`` where all three
-        are zero when no margins are detected (step can be skipped).
-
-    ``threshold_x`` is the number of consecutive zeros from the right edge of
-    the first row (range margin).  ``threshold_y_start`` / ``threshold_y_end``
-    are 1 when the corresponding edge row is entirely zero, 0 otherwise.
+    Samples rows 100px inside each edge (avoids pure-zero edge rows) and counts
+    zero pixels.  Returns fixed ``_AZIMUTH_CUT`` when too many zeros found.
+    ``threshold_x`` is always ``_RANGE_CUT`` (fixed, independent of content).
     """
     with rasterio.open(path) as ds:
         w, h = ds.width, ds.height
-        first_row = ds.read(1, window=Window(0, 0, w, 1)).ravel().astype(np.float64)
-        last_row = ds.read(1, window=Window(0, h - 1, w, 1)).ravel().astype(np.float64)
+        north = ds.read(1, window=Window(0, 100, w, 1)).ravel()
+        south = ds.read(1, window=Window(0, h - 100, w, 1)).ravel()
 
-    # Range margin: trailing zeros from right end of first row
-    nz = np.nonzero(first_row[::-1])[0]
-    threshold_x = int(nz[0]) if nz.size else w
+    crop_north = int(np.sum(north == 0) > _NODATA_THR)
+    crop_south = int(np.sum(south == 0) > _NODATA_THR)
 
-    # Azimuth margins: 1 iff the full edge row is zero
-    threshold_y_start = int(np.all(first_row == 0))
-    threshold_y_end = int(np.all(last_row == 0))
-
-    return threshold_x, threshold_y_start, threshold_y_end
+    return _RANGE_CUT, _AZIMUTH_CUT * crop_north, _AZIMUTH_CUT * crop_south
 
 
 @StepRegistry.register
@@ -51,13 +47,13 @@ class SARBorderCutStep(OTBStepBase):
 
     Two-phase execution:
 
-    1. **Python phase** — reads the first and last image rows to detect
-       zero-value margins from burst stitching.  If no margins are found,
-       the step is skipped and the input path is forwarded unchanged.
-    2. **OTB phase** — calls ``otbcli_ResetMargin`` to zero the detected
-       margins in range and azimuth.  Requires OTB ≥ 7.3.
+    1. **Python phase** — samples rows 100px inside top/bottom edges to detect
+       azimuth margins.  Range margin uses a fixed 1000-pixel constant.
+       If all thresholds are zero the step is skipped.
+    2. **OTB phase** — calls ``otbcli_ResetMargin`` with ``mode=threshold``.
+       Requires OTB ≥ 7.3.
 
-    Thresholds can be supplied explicitly to bypass auto-detection::
+    Example::
 
         import eo_pipe
         from eo_pipe import PipelineComposition, ParallelBatch
@@ -72,16 +68,15 @@ class SARBorderCutStep(OTBStepBase):
 
     Parameters:
         threshold_x (int | None):
-            Range margin width in pixels, zeroed on both left and right sides.
-            Auto-detected from first image row when ``None`` (default).
+            Range margin in pixels (both sides). Default: ``1000``.
         threshold_y_start (int | None):
-            Azimuth start margin in rows.  Auto-detected when ``None``.
+            Azimuth start margin in rows. Auto-detected when ``None``.
         threshold_y_end (int | None):
-            Azimuth end margin in rows.  Auto-detected when ``None``.
+            Azimuth end margin in rows. Auto-detected when ``None``.
         compress (bool):
-            Write DEFLATE-compressed tiled GeoTIFF.  Default: ``True``.
+            Write DEFLATE-compressed tiled GeoTIFF. Default: ``True``.
         ram_mb (int):
-            RAM budget in megabytes.  Default: ``256``.
+            RAM budget in megabytes. Default: ``256``.
     """
 
     name = "sar_cut_borders"
@@ -112,7 +107,23 @@ class SARBorderCutStep(OTBStepBase):
             return StepOutput(outputs=[FlushedOutput(inputs[0])])
 
         merged = {**params, "threshold_x": tx, "threshold_y_start": ty_start, "threshold_y_end": ty_end}
-        return super().execute(inputs, output_dir, **merged)
+        result = super().execute(inputs, output_dir, **merged)
+
+        # OTB ResetMargin can drop georeference; copy CRS+transform from input if missing.
+        out_path = result.outputs[0].path
+        with rasterio.open(out_path) as dst_ds:
+            has_crs = dst_ds.crs is not None
+        if not has_crs:
+            with rasterio.open(inputs[0]) as src_ds:
+                src_crs = src_ds.crs
+                src_transform = src_ds.transform
+            if src_crs is not None:
+                with rasterio.open(out_path, "r+") as dst_ds:
+                    dst_ds.crs = src_crs
+                    dst_ds.transform = src_transform
+                logger.debug("Copied CRS from input to OTB ResetMargin output")
+
+        return result
 
     def build_otb_params(
         self,
@@ -120,15 +131,9 @@ class SARBorderCutStep(OTBStepBase):
         output_path: Path,
         **params: Any,
     ) -> Dict[str, Any]:
-        """Build ``ResetMargin`` parameter dict from resolved thresholds.
-
-        ``threshold_x``, ``threshold_y_start``, and ``threshold_y_end`` must
-        be present in ``params`` — they are injected by :meth:`execute` before
-        this method is called.
-        """
-
         return {
             self.param_in: str(inputs[0]),
+            "mode": "threshold",
             "threshold.x": int(params["threshold_x"]),
             "threshold.y.start": int(params["threshold_y_start"]),
             "threshold.y.end": int(params["threshold_y_end"]),
