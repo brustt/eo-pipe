@@ -90,6 +90,7 @@ class PipelineComposition:
         inputs: List[Path],
         output_dir: Optional[Path] = None,
         save_intermediate: bool = False,
+        preflight: bool = True,
     ) -> PipelineContext:
         """Execute all steps in order and return the resulting context.
 
@@ -104,11 +105,25 @@ class PipelineComposition:
             output_dir: Where to copy final outputs when
                         *save_intermediate* is ``False``.
             save_intermediate: Persist all intermediate step outputs.
+            preflight: When ``True`` (default), call ``step.is_available()``
+                       for every step before processing any inputs and raise
+                       :class:`RuntimeError` listing all unavailable steps.
 
         Returns:
             :class:`PipelineContext` with ``inputs`` pointing to the final
             outputs and ``outputs`` containing every step's result.
         """
+        if preflight:
+            unavailable = [
+                step.name for step, _, _ in self._steps if not step.is_available()
+            ]
+            if unavailable:
+                raise RuntimeError(
+                    "Pipeline preflight failed — the following steps are not available"
+                    " in the current environment:\n"
+                    + "\n".join(f"  • {name}" for name in unavailable)
+                )
+
         if save_intermediate:
             workspace = self._workspace or Path.cwd() / "eo_pipe_run"
             workspace.mkdir(parents=True, exist_ok=True)

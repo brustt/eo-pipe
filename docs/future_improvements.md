@@ -6,6 +6,11 @@ This document collects architectural ideas that go beyond the current implementa
 
 ## Open questions & short-term backlog
 
+### Multi-input OTB steps (BandMath, Synthetize, …)
+
+`OTBStepBase._path_strategy.resolve(self.name, inputs[0], ...)` hardcodes `inputs[0]` for output naming. Fine for single-input steps like `OrthoRectifyStep` with `ParallelBatch`. For multi-input apps (e.g. `BandMath` receiving several bands at once, `Synthetize`) the output name should not derive from a single input. Fix: either accept an `output_name` param and use `NamedPathStrategy`, or add a `_resolve_output_path(inputs, output_dir, **params)` hook alongside `build_otb_params`.
+
+
 ### Use PathStrategy everywhere
 
 `RasterizeStep` hardcodes `output_dir / f"{output_name}_{inp.stem}.tif"` instead of using a `PathStrategy`. Inconsistent path naming makes output locations harder to predict and override. Low-cost fix: adopt `PrefixedPathStrategy` in `RasterizeStep`.

@@ -122,6 +122,14 @@ class StepBase(ABC):
         """
         ...
 
+    def is_available(self) -> bool:
+        """Return True if this step's runtime dependencies are satisfied.
+
+        Override in steps that require external binaries or optional packages
+        (e.g. OTB CLI, system GDAL). Default assumes no external dependencies.
+        """
+        return True
+
     def run(
         self,
         inputs: List[Path],
