@@ -152,8 +152,11 @@ class OrthoRectifyStep(OTBStepBase):
                 ref_bounds = ref_ds.bounds
 
             with rasterio.open(inputs[0]) as src_ds:
+                # OTB-processed files (e.g. SARCalibration output) sometimes
+                # lack an embedded CRS. S1 GRD is always WGS84 — fall back.
+                src_crs = src_ds.crs or rasterio.crs.CRS.from_epsg(4326)
                 src_bounds = rasterio.warp.transform_bounds(
-                    src_ds.crs, ref_crs, *src_ds.bounds
+                    src_crs, ref_crs, *src_ds.bounds
                 )
 
             # Intersect source footprint with reference extent
