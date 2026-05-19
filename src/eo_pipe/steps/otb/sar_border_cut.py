@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -13,6 +14,8 @@ from eo_pipe.io.output_types import FlushedOutput
 from eo_pipe.pipeline.base import StepOutput
 from eo_pipe.pipeline.registry import StepRegistry
 from eo_pipe.steps.otb.base import OTBStepBase
+
+logger = logging.getLogger(__name__)
 
 
 def _detect_s1_borders(path: Path) -> Tuple[int, int, int]:
@@ -112,7 +115,7 @@ class SARBorderCutStep(OTBStepBase):
             tx, ty_start, ty_end = _detect_s1_borders(inputs[0])
 
         if tx == 0 and ty_start == 0 and ty_end == 0:
-            # No margins — passthrough without calling OTB
+            logger.warning("No S1 margins detected — passthrough without calling OTB ResetMargin")
             return StepOutput(outputs=[FlushedOutput(inputs[0])])
 
         merged = {**params, "threshold_x": tx, "threshold_y_start": ty_start, "threshold_y_end": ty_end}
