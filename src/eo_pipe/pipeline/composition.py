@@ -1,6 +1,7 @@
 import shutil
 import tempfile
 from pathlib import Path
+from time import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .base import StepBase, StepResult
@@ -159,6 +160,7 @@ class PipelineComposition:
             save_intermediate=save_intermediate,
         )
 
+        pipeline_start = time()
         for step_idx, (step, batch, params) in enumerate(self._steps):
             step_dir = workspace / f"{step_idx:02d}_{step.name}"
             step_dir.mkdir(parents=True, exist_ok=True)
@@ -168,4 +170,9 @@ class PipelineComposition:
             ctx.record_step(step.name, result)
             ctx.advance_inputs(result)
 
+        logger.info(
+            "Pipeline complete — %d step(s) in %.2fs",
+            len(self._steps),
+            time() - pipeline_start,
+        )
         return ctx

@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 from abc import abstractmethod
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List
 
+import rasterio
+
 from eo_pipe.io.output_types import FlushedOutput
+
+logger = logging.getLogger(__name__)
 from eo_pipe.io.path_utils import PrefixedPathStrategy
+from eo_pipe.io.raster_io import _add_gdal_options
 from eo_pipe.pipeline.base import StepBase, StepOutput
 
 
@@ -51,15 +57,7 @@ class OTBStepBase(StepBase):
     otb_app: ClassVar[str]
     param_in: ClassVar[str] = "in"
     param_out: ClassVar[str] = "out"
-
-    _COMPRESS_SUFFIX = (
-        "?&gdal:co:COMPRESS=DEFLATE"
-        "&gdal:co:BIGTIFF=YES"
-        "&gdal:co:NUM_THREADS=ALL_CPUS"
-        "&gdal:co:TILED=YES"
-        "&gdal:co:BLOCKXSIZE=256"
-        "&gdal:co:BLOCKYSIZE=256"
-    )
+    _apply_gdal_options: ClassVar[bool] = True
 
     def is_available(self) -> bool:
         return shutil.which(f"otbcli_{self.otb_app}") is not None
@@ -123,23 +121,52 @@ class OTBStepBase(StepBase):
         otb_params[self.param_out] = self._format_otb_output(out_path, **params)
 
         cmd = self._build_cmd(cmd_name, otb_params)
-        proc = subprocess.run(cmd, capture_output=False, text=True)  # noqa: S603
+        # TODO: implement production: capture OTB output : subprocess.PIPE
+        proc = subprocess.run(cmd)  # noqa: S603
         if proc.returncode != 0:
             raise RuntimeError(
-                f"OTB '{self.otb_app}' failed (exit {proc.returncode}):\n{proc.stderr}"
+                f"OTB '{self.otb_app}' failed (exit {proc.returncode}):\n{proc.stdout}"
             )
 
+        self._restore_crs(inputs[0], out_path)
         return StepOutput(outputs=[FlushedOutput(out_path)])
 
-    def _format_otb_output(self, out_path: Path, **params: Any) -> str:
-        """Return the OTB output path string, optionally with extended filename options.
+    def _restore_crs(self, src: Path, dst: Path) -> None:
+        """Copy georeferencing from *src* to *dst* when OTB drops it.
 
-        Override in subclasses to append GDAL creation options via OTB's extended
-        filename syntax (``path.tif?&gdal:co:COMPRESS=DEFLATE&...``). The base
-        implementation returns the plain path; ``FlushedOutput`` always tracks the
-        clean path regardless of any suffix added here.
+        Handles three cases: CRS+transform, transform-only (S1 raw TIFFs with
+        no embedded projection tag), and GCP-based georeferencing.
         """
-        return str(out_path)
+        if not dst.exists():
+            return
+        with rasterio.open(dst) as ds:
+            if ds.crs is not None and not ds.transform.is_identity:
+                return
+        with rasterio.open(src) as src_ds:
+            crs = src_ds.crs
+            transform = src_ds.transform
+            gcps, gcp_crs = src_ds.gcps
+
+        has_transform = not transform.is_identity
+        if crs is None and not has_transform and not gcps:
+            return
+
+        with rasterio.open(dst, "r+") as dst_ds:
+            if crs is not None:
+                dst_ds.crs = crs
+            if has_transform:
+                dst_ds.transform = transform
+            if gcps:
+                dst_ds.gcps = (gcps, gcp_crs)
+        logger.info("Restored georeferencing from %s to OTB output %s", src.name, dst.name)
+
+    def _format_otb_output(self, out_path: Path, **params: Any) -> str:
+        """Return the OTB output path string, with GDAL creation options appended when supported."""
+        if not self._apply_gdal_options or not params.get("compress", True):
+            return str(out_path)
+        opts = _add_gdal_options()
+        suffix = "?&" + "&".join(f"gdal:co:{k}={v}" for k, v in opts.items())
+        return f"{out_path}{suffix}"
 
     def _build_cmd(self, cmd_name: str, otb_params: Dict[str, Any]) -> List[str]:
         """Flatten an OTB parameter dict into a CLI argument list.

@@ -1,10 +1,8 @@
 # eo-pipe
 
-> **Personal project — not intended for production use.** The library is functional but still rough in places and would benefit from further testing, documentation, and hardening before being used in a critical context.
-
 A modular, extensible Python library for building Earth Observation processing pipelines. Compose raster and vector operations into reproducible, chainable workflows — without coupling your code to a specific domain or dataset.
 
-Originally developed through a project at [ONF International](https://www.onf-international.org/) for RGB drone images, it has been completely refactored using [Claude Code](https://claude.ai/code) to make a generic geospatial processing librairy.
+Originally developed through a project at [ONF International](https://www.onf-international.org/) for RGB drone images, it has been completely refactored to make a generic geospatial processing librairy.
 
 ## Features
 
@@ -60,6 +58,9 @@ print(ctx.outputs["clip"])  # StepResult for a specific step
 | `calibrate` | raster | Histogram matching |
 | `merge_vector` | vector | Merge vector files |
 | `rasterize` | vector | Burn vector values onto a raster grid |
+| `orthorectify` | raster | Build orthoimage (OTB) |
+| `s1_extract_metadata` | raster (Sentinel 1) | Extract metadata from Sentinel-1 files |
+| `s1_calibrate` | raster (Sentinel 1) | Calibrate Sentinel-1 acquisition (OTB) |
 
 ## Extending the library
 

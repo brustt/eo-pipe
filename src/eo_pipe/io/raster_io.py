@@ -101,6 +101,8 @@ class RasterWriter:
         self,
         output_file: Union[str, Path],
         data: np.ndarray,
+        gcps: Optional[list] = None,
+        gcp_crs: Optional[Any] = None,
         **profile: Any,
     ) -> Path:
         """Write *data* to a GeoTIFF, optionally converting to COG.
@@ -108,9 +110,14 @@ class RasterWriter:
         If :attr:`nodata` is set on this writer, it overrides whatever nodata
         value is in *profile*.
 
+        When *gcps* is provided, ``crs`` and ``transform`` are stripped from
+        *profile* (GCPs and affine transform are mutually exclusive in GeoTIFF).
+
         Args:
             output_file: Destination path.
             data: Array shaped ``(bands, height, width)``.
+            gcps: Ground control points to embed (e.g. from a S1 annotation XML).
+            gcp_crs: CRS of the GCP coordinates (required when *gcps* is set).
             **profile: Rasterio profile keyword arguments.
 
         Returns:
@@ -126,8 +133,14 @@ class RasterWriter:
         if self.nodata is not None:
             profile["nodata"] = self.nodata
 
+        if gcps:
+            profile.pop("crs", None)
+            profile.pop("transform", None)
+
         with rio.open(output_file, "w", **profile) as dst:
             dst.write(data)
+            if gcps:
+                dst.gcps = (gcps, gcp_crs)
 
         if self.cog:
             self._to_cog(output_file, profile.get("nodata", 0))
@@ -155,6 +168,23 @@ class RasterWriter:
 
 
 DEFAULT_WRITER = RasterWriter()
+
+
+# ---------------------------------------------------------------------------
+# GDAL creation options
+# ---------------------------------------------------------------------------
+
+
+def _add_gdal_options() -> Dict[str, str]:
+    """Return standard GDAL creation options for compressed tiled GeoTIFFs."""
+    return {
+        "COMPRESS": "DEFLATE",
+        "BIGTIFF": "YES",
+        "NUM_THREADS": "ALL_CPUS",
+        "TILED": "YES",
+        "BLOCKXSIZE": "256",
+        "BLOCKYSIZE": "256",
+    }
 
 
 # ---------------------------------------------------------------------------

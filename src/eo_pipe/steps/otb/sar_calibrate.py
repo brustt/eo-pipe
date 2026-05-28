@@ -78,11 +78,11 @@ class SARCalibrationStep(OTBStepBase):
             )
 
         removenoise: bool = bool(params.get("removenoise", False))
-        ram_mb: int = int(params.get("ram_mb", 1024))
+        ram_mb: int = int(params.get("ram_mb", 256))
 
         return {
             self.param_in: str(inputs[0]),
             "lut": lut,
             "removenoise": removenoise,
-            "ram": ram_mb,
+            "opt.ram": ram_mb,
         }

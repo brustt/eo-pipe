@@ -1,5 +1,6 @@
 import logging
 import os
+import shutil
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
@@ -9,7 +10,9 @@ from rich.logging import RichHandler
 from rich.theme import Theme
 from rich.traceback import install
 
-install(show_locals=True)
+_TERM_WIDTH = shutil.get_terminal_size(fallback=(220, 50)).columns
+
+install(show_locals=True, width=_TERM_WIDTH)
 
 custom_theme = Theme(
     {
@@ -22,7 +25,7 @@ custom_theme = Theme(
     }
 )
 
-console = Console(theme=custom_theme)
+console = Console(theme=custom_theme, force_terminal=True, width=_TERM_WIDTH)
 
 
 class RichRotatingFileHandler(RotatingFileHandler):
@@ -61,8 +64,9 @@ def setup_logger(
     level = level or env_level
 
     logger = logging.getLogger(name)
+    if logger.handlers:
+        return logger
     logger.setLevel(level)
-    logger.handlers = []
 
     rich_handler = RichHandler(
         console=console,

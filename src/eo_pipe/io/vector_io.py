@@ -30,3 +30,14 @@ def save_vector(
     gdf.to_file(output_path, driver=driver)
     logger.info(f"Vector saved to {output_path}")
     return output_path
+
+
+
+def _read_geodataframe(path: Path):
+    """Read .gpkg or .parquet into a GeoDataFrame."""
+    import geopandas as gpd
+
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        return gpd.read_parquet(path)
+    return gpd.read_file(path)

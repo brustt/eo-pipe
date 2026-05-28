@@ -150,7 +150,7 @@ class StepBase(ABC):
             Exception: Re-raises any exception from :meth:`execute` after logging.
         """
         start = time()
-        log_step_start(self._logger, self.name, inputs=inputs, output_dir=output_dir)
+        log_step_start(self._logger, self.name, inputs=inputs, output_dir=output_dir, **params)
         try:
             result = self.execute(inputs, output_dir, **params)
             log_step_complete(self._logger, self.name, duration=time() - start)

@@ -25,6 +25,10 @@ dependencies = [
     "gdal-utils==3.12.2.0",
     "pyarrow>=23.0.1",
     "rootutils>=1.0.7",
+    "xarray>=2026.4.0",
+    "matplotlib>=3.10.9",
+    "rioxarray>=0.22.0",
+    "joblib>=1.5.3",
 ]
 
 [dependency-groups]
