@@ -59,7 +59,7 @@ class RasterWriter:
     tiled: bool = True
     blockxsize: int = 512
     blockysize: int = 512
-    bigtiff: Literal["auto", "yes", "no"] = "auto"
+    bigtiff: bool = True
     predictor: Optional[int] = None
     nodata: Optional[float] = None
     cog: bool = False
@@ -84,10 +84,7 @@ class RasterWriter:
             opts["blockxsize"] = self.blockxsize
             opts["blockysize"] = self.blockysize
 
-        bigtiff_val = self.bigtiff.upper()
-        if bigtiff_val == "AUTO":
-            opts["BIGTIFF"] = "IF_SAFER"
-        elif bigtiff_val == "YES":
+        if self.bigtiff:
             opts["BIGTIFF"] = "YES"
 
         if self.compress != "none":

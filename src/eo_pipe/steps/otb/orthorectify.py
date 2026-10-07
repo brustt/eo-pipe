@@ -7,9 +7,11 @@ from typing import Any, Dict, List, Optional
 import rasterio
 import rasterio.crs
 import rasterio.warp
+from rasterio.coords import BoundingBox
 
 from eo_pipe.pipeline.registry import StepRegistry
 from eo_pipe.steps.otb.base import OTBStepBase
+from eo_pipe.steps.utils import CxPolygon
 
 import logging
 logger = logging.getLogger(__name__)
@@ -29,8 +31,15 @@ class OrthoRectifyStep(OTBStepBase):
       ``outputs.mode=orthofit``.
 
     Parameters (passed via ``**params`` to :meth:`build_otb_params`):
-        ref (Path): Reference image. **Required.**
-        ref_mode (str): ``"explicit"`` (default) or ``"orthofit"``.
+        ref (Path | None): Reference image. Required unless ``ref_extent`` is given.
+        ref_extent (Polygon | None): Output extent as ``(UL, UR, LR, LL)`` corners in
+            WGS 84 ``(lon, lat)``. Used to derive the output grid when ``ref`` is
+            not given. Ignored when ``ref`` is given.
+        ref_epsg (int | None): Output EPSG when deriving the grid from ``ref_extent``.
+            Default: UTM zone of the extent centre.
+        ref_resolution (float): Output pixel size (CRS units) when deriving the grid
+            from ``ref_extent``. Default: ``10.0``.
+        ref_mode (str): ``"explicit"`` (default) or ``"orthofit"`` (needs ``ref``).
         interpolator (str): OTB resampling method. Default: ``"bco"``.
         elev_dem (Path | None): DEM directory. Optional.
         elev_geoid (Path | None): Geoid file. Optional.
@@ -57,9 +66,11 @@ class OrthoRectifyStep(OTBStepBase):
             )
 
         ref: Optional[Path] = params.get("ref")
-        if ref is None:
+        ref_extent: Optional[CxPolygon] = params.get("ref_extent")
+        if ref is None and ref_extent is None:
             raise TypeError(
-                f"{self.name} requires 'ref=Path(...)' — pass the reference image path to add_step()."
+                f"{self.name} requires either 'ref=Path(...)' (reference image) or "
+                "'ref_extent=Polygon' — pass one to add_step()."
             )
 
         ref_mode: str = params.get("ref_mode", "explicit")
@@ -87,19 +98,41 @@ class OrthoRectifyStep(OTBStepBase):
             otb_params["elev.geoid"] = str(elev_geoid)
 
         if ref_mode == "orthofit":
+            if ref is None:
+                raise ValueError(
+                    f"{self.name}: ref_mode='orthofit' requires 'ref'; ref_extent is not supported."
+                )
             otb_params["outputs.mode"] = "orthofit"
             otb_params["outputs.ortho"] = str(ref)
         else:
-            # Derive output grid from ref bounds intersected with source footprint.
-            with rasterio.open(ref) as ref_ds:
-                ref_crs = ref_ds.crs
-                ref_bounds = ref_ds.bounds
-                res_x = abs(ref_ds.transform.a)
-                res_y = abs(ref_ds.transform.e)
+            # Derive output grid from ref (or ref_extent) bounds intersected with source footprint.
+            if ref is not None:
+                with rasterio.open(ref) as ref_ds:
+                    ref_crs = ref_ds.crs
+                    ref_bounds = ref_ds.bounds
+                    res_x = abs(ref_ds.transform.a)
+                    res_y = abs(ref_ds.transform.e)
+            else:
+                res_x = res_y = float(params.get("ref_resolution", 10.0))
+                ref_crs, ref_bounds = _grid_from_extent(
+                    ref_extent, params.get("ref_epsg"), res_x
+                )
 
             with rasterio.open(inputs[0]) as src_ds:
                 src_crs = src_ds.crs
                 src_bounds = src_ds.bounds
+                if src_crs is None:
+                    # Raw S1 GRD: georeferenced by GCPs only, so bounds are pixel space.
+                    gcps, gcp_crs = src_ds.gcps
+                    if not gcps:
+                        raise ValueError(
+                            f"{self.name}: {inputs[0]} has neither a CRS nor GCPs."
+                        )
+                    src_crs = gcp_crs or rasterio.crs.CRS.from_epsg(4326)
+                    src_bounds = (
+                        min(g.x for g in gcps), min(g.y for g in gcps),
+                        max(g.x for g in gcps), max(g.y for g in gcps),
+                    )
 
             if src_crs != ref_crs:
                 src_bounds = rasterio.warp.transform_bounds(src_crs, ref_crs, *src_bounds)
@@ -128,6 +161,22 @@ class OrthoRectifyStep(OTBStepBase):
             otb_params.update(_map_projection_params(ref_crs))
 
         return otb_params
+
+
+def _grid_from_extent(
+    extent: CxPolygon, epsg: Optional[int], resolution: float
+) -> "tuple[rasterio.crs.CRS, BoundingBox]":
+    """Project a WGS 84 ``(UL, UR, LR, LL)`` extent into *epsg* and snap to *resolution*."""
+    lons = [pt[0] for pt in extent]
+    lats = [pt[1] for pt in extent]
+    if epsg is None:
+        zone = int((sum(lons) / len(lons) + 180) // 6) % 60 + 1
+        epsg = (32600 if sum(lats) / len(lats) >= 0 else 32700) + zone
+    crs = rasterio.crs.CRS.from_epsg(epsg)
+    left, bottom, right, top = rasterio.warp.transform_bounds(
+        "EPSG:4326", crs, min(lons), min(lats), max(lons), max(lats)
+    )
+    return crs, BoundingBox(left, bottom, right, top)
 
 
 def _map_projection_params(crs: rasterio.crs.CRS) -> Dict[str, Any]:

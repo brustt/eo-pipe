@@ -4,6 +4,9 @@
 import eo_pipe.steps  # noqa: F401
 
 from eo_pipe.steps.otb import OTBStepBase
+from eo_pipe.steps.otb.env import activate_otb
+
+activate_otb()  # source otbenv.profile once, if OTB isn't already on PATH
 
 from eo_pipe.io.output_types import (
     FlushedOutput,

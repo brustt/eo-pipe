@@ -6,7 +6,7 @@ import osgeo
 import osgeo.osr as osr
 from eo_pipe.io.vector_io import _read_geodataframe
 
-Polygon = Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float], Tuple[float, float]]
+CxPolygon = Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float], Tuple[float, float]]
 
 # EPSG:6933 — WGS 84 / NSIDC EASE-Grid 2.0 World (equal-area, metres)
 _EQUAL_AREA_EPSG = 6933
@@ -27,7 +27,7 @@ def _detect_tile_col(columns) -> str:
 def get_best_s2_tile(
     study_area: Path,
     s2_grid: Path,
-) -> Tuple[str, Polygon]:
+) -> Tuple[str, CxPolygon]:
     """Return the S2 MGRS tile that overlaps *study_area* the most.
 
     Parameters
@@ -72,13 +72,13 @@ def get_best_s2_tile(
 
     best = candidates.loc[candidates["_overlap_m2"].idxmax()]
     tile_name: str = best[tile_col]
-    b = best.geometry.bounds  # (minx, miny, maxx, maxy) in WGS 84
+    (minx, miny, maxx, maxy) = best.geometry.bounds  # (minx, miny, maxx, maxy) in WGS 84
     # Build Polygon as (UL, UR, LR, LL) in (lon, lat) — matches s2_tile_extent expectation.
-    tile_extent: Polygon = (
-        (b.minx, b.maxy),  # UL
-        (b.maxx, b.maxy),  # UR
-        (b.maxx, b.miny),  # LR
-        (b.minx, b.miny),  # LL
+    tile_extent: CxPolygon = (
+        (minx, maxy),  # UL
+        (maxx, maxy),  # UR
+        (maxx, miny),  # LR
+        (minx, miny),  # LL
     )
 
     return tile_name, tile_extent

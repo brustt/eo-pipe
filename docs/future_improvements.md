@@ -148,3 +148,10 @@ Confirmed for observability. Two additions the design should address:
 
 ### Logging
 logger is recreated at each step ?
+
+### 6-10
+- Polygon user type : misleading with shapely built-in type.
+- _grid_from_extent assume 4326 epsg
+- use s1 global footprint orbit instead of S2 mgrs for orthofit ?
+  - => easier to catch whole scene
+  - s2 needed to align S2 data in the future

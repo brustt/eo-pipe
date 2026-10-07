@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import shutil
 import subprocess
 from abc import abstractmethod
 from pathlib import Path
@@ -17,6 +16,7 @@ logger = logging.getLogger(__name__)
 from eo_pipe.io.path_utils import PrefixedPathStrategy
 from eo_pipe.io.raster_io import _add_gdal_options
 from eo_pipe.pipeline.base import StepBase, StepOutput
+from eo_pipe.steps.otb.env import otb_env, which_otb
 
 
 class OTBStepBase(StepBase):
@@ -60,7 +60,7 @@ class OTBStepBase(StepBase):
     _apply_gdal_options: ClassVar[bool] = True
 
     def is_available(self) -> bool:
-        return shutil.which(f"otbcli_{self.otb_app}") is not None
+        return which_otb(f"otbcli_{self.otb_app}") is not None
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -103,7 +103,7 @@ class OTBStepBase(StepBase):
             )
 
         cmd_name = f"otbcli_{self.otb_app}"
-        if shutil.which(cmd_name) is None:
+        if which_otb(cmd_name) is None:
             raise RuntimeError(
                 f"OTB CLI command '{cmd_name}' not found on PATH. Install OrfeoToolbox"
                 " and ensure its bin/ directory is on PATH."
@@ -122,7 +122,7 @@ class OTBStepBase(StepBase):
 
         cmd = self._build_cmd(cmd_name, otb_params)
         # TODO: implement production: capture OTB output : subprocess.PIPE
-        proc = subprocess.run(cmd)  # noqa: S603
+        proc = subprocess.run(cmd, env=otb_env())  # noqa: S603
         if proc.returncode != 0:
             raise RuntimeError(
                 f"OTB '{self.otb_app}' failed (exit {proc.returncode}):\n{proc.stdout}"

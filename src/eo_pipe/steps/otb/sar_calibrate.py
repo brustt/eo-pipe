@@ -41,8 +41,6 @@ class SARCalibrationStep(OTBStepBase):
             Remove thermal noise using the LUT in S1 product metadata.
             Default: ``False``. Enable only for products with intact noise
             LUTs — corrupted LUTs cause a C++ segfault inside OTB.
-        ram_mb (int):
-            RAM budget in megabytes. Default: ``256``.
         compress (bool):
             Write DEFLATE-compressed tiled GeoTIFF. Default: ``True``.
     """
@@ -78,11 +76,9 @@ class SARCalibrationStep(OTBStepBase):
             )
 
         removenoise: bool = bool(params.get("removenoise", False))
-        ram_mb: int = int(params.get("ram_mb", 256))
 
         return {
             self.param_in: str(inputs[0]),
             "lut": lut,
             "removenoise": removenoise,
-            "opt.ram": ram_mb,
         }

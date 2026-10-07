@@ -51,6 +51,24 @@ def _geographic_raster(tmp_path: Path, name: str = "img.tif") -> Path:
     return _write_raster(tmp_path / name, CRS.from_epsg(4326))
 
 
+def _gcp_raster(tmp_path: Path, name: str = "gcp.tif", with_gcps: bool = True) -> Path:
+    """Raw S1-like raster: no CRS/transform, georeferenced by GCPs only (lon 0..0.64)."""
+    from rasterio.control import GroundControlPoint
+
+    gcps = [
+        GroundControlPoint(row=r, col=c, x=c / W * 0.64, y=0.64 - r / H * 0.64)
+        for r, c in ((0, 0), (0, W), (H, W), (H, 0))
+    ]
+    path = tmp_path / name
+    with rio.open(
+        path, "w", driver="GTiff", dtype="uint8", width=W, height=H, count=1,
+    ) as dst:
+        dst.write(np.ones((1, H, W), dtype=np.uint8))
+        if with_gcps:
+            dst.gcps = (gcps, CRS.from_epsg(4326))
+    return path
+
+
 def _utm31n_raster(tmp_path: Path, name: str = "img.tif") -> Path:
     return _write_raster(
         tmp_path / name,
@@ -263,6 +281,60 @@ class TestBuildOtbParams:
         with pytest.raises(TypeError, match="ref=Path"):
             OrthoRectifyStep().build_otb_params([src], tmp_path / "out.tif")
 
+    def test_ref_extent_derives_grid(self, tmp_path):
+        src = _geographic_raster(tmp_path, "src.tif")  # bounds (0, 0, 0.64, 0.64)
+        extent = ((0.1, 0.5), (0.5, 0.5), (0.5, 0.1), (0.1, 0.1))
+        params = OrthoRectifyStep().build_otb_params(
+            [src], tmp_path / "out.tif", ref_extent=extent, ref_epsg=4326, ref_resolution=0.01
+        )
+        assert params["map"] == "wgs"
+        assert params["outputs.sizex"] == 40
+        assert params["outputs.sizey"] == 40
+        assert params["outputs.spacingx"] == 0.01
+        assert params["outputs.spacingy"] == -0.01
+
+    def test_ref_extent_default_utm(self, tmp_path):
+        src = _geographic_raster(tmp_path, "src.tif")
+        extent = ((0.1, 0.5), (0.5, 0.5), (0.5, 0.1), (0.1, 0.1))
+        params = OrthoRectifyStep().build_otb_params(
+            [src], tmp_path / "out.tif", ref_extent=extent
+        )
+        assert params["map"] == "utm"
+        assert params["map.utm.zone"] == 31
+
+    def test_gcp_only_source_uses_gcp_footprint(self, tmp_path):
+        src = _gcp_raster(tmp_path)
+        extent = ((0.1, 0.5), (0.5, 0.5), (0.5, 0.1), (0.1, 0.1))
+        params = OrthoRectifyStep().build_otb_params(
+            [src], tmp_path / "out.tif", ref_extent=extent, ref_epsg=4326, ref_resolution=0.01
+        )
+        assert params["outputs.sizex"] == 40
+        assert params["outputs.sizey"] == 40
+
+    def test_gcp_only_source_no_overlap_raises(self, tmp_path):
+        src = _gcp_raster(tmp_path)
+        extent = ((10.0, 11.0), (11.0, 11.0), (11.0, 10.0), (10.0, 10.0))
+        with pytest.raises(ValueError, match="no spatial overlap"):
+            OrthoRectifyStep().build_otb_params(
+                [src], tmp_path / "out.tif", ref_extent=extent, ref_epsg=4326, ref_resolution=0.01
+            )
+
+    def test_source_without_crs_or_gcps_raises(self, tmp_path):
+        src = _gcp_raster(tmp_path, "bare.tif", with_gcps=False)
+        extent = ((0.1, 0.5), (0.5, 0.5), (0.5, 0.1), (0.1, 0.1))
+        with pytest.raises(ValueError, match="neither a CRS nor GCPs"):
+            OrthoRectifyStep().build_otb_params(
+                [src], tmp_path / "out.tif", ref_extent=extent, ref_epsg=4326
+            )
+
+    def test_orthofit_without_ref_raises(self, tmp_path):
+        src = _geographic_raster(tmp_path, "src.tif")
+        extent = ((0.1, 0.5), (0.5, 0.5), (0.5, 0.1), (0.1, 0.1))
+        with pytest.raises(ValueError, match="orthofit"):
+            OrthoRectifyStep().build_otb_params(
+                [src], tmp_path / "out.tif", ref_extent=extent, ref_mode="orthofit"
+            )
+
     def test_pixel_spacing_positive_x_negative_y(self, tmp_path):
         ref = _geographic_raster(tmp_path, "ref.tif")
         src = _geographic_raster(tmp_path, "src.tif")
@@ -290,7 +362,7 @@ class TestOrthoRectifyExecute:
         src = _geographic_raster(tmp_path, "src.tif")
         out_dir = tmp_path / "out"
 
-        with patch(f"{_OTB_APP}.shutil.which", return_value=_FAKE_CLI), \
+        with patch(f"{_OTB_APP}.which_otb", return_value=_FAKE_CLI), \
              patch(f"{_OTB_APP}.subprocess.run", return_value=_mock_proc()) as mock_run:
             OrthoRectifyStep().execute([src], out_dir, ref=ref)
 
@@ -302,7 +374,7 @@ class TestOrthoRectifyExecute:
         src = _geographic_raster(tmp_path, "src.tif")
         out_dir = tmp_path / "out"
 
-        with patch(f"{_OTB_APP}.shutil.which", return_value=_FAKE_CLI), \
+        with patch(f"{_OTB_APP}.which_otb", return_value=_FAKE_CLI), \
              patch(f"{_OTB_APP}.subprocess.run", return_value=_mock_proc()) as mock_run:
             OrthoRectifyStep().execute([src], out_dir, ref=ref)
 
@@ -316,7 +388,7 @@ class TestOrthoRectifyExecute:
         src = _geographic_raster(tmp_path, "src.tif")
         out_dir = tmp_path / "out"
 
-        with patch(f"{_OTB_APP}.shutil.which", return_value=_FAKE_CLI), \
+        with patch(f"{_OTB_APP}.which_otb", return_value=_FAKE_CLI), \
              patch(f"{_OTB_APP}.subprocess.run", return_value=_mock_proc()) as mock_run:
             OrthoRectifyStep().execute([src], out_dir, ref=ref)
 
@@ -330,7 +402,7 @@ class TestOrthoRectifyExecute:
         src = _geographic_raster(tmp_path, "src.tif")
         out_dir = tmp_path / "out"
 
-        with patch(f"{_OTB_APP}.shutil.which", return_value=_FAKE_CLI), \
+        with patch(f"{_OTB_APP}.which_otb", return_value=_FAKE_CLI), \
              patch(f"{_OTB_APP}.subprocess.run", return_value=_mock_proc()) as mock_run:
             OrthoRectifyStep().execute([src], out_dir, ref=ref, compress=False)
 
@@ -342,7 +414,7 @@ class TestOrthoRectifyExecute:
         ref = _geographic_raster(tmp_path, "ref.tif")
         src = _geographic_raster(tmp_path, "src.tif")
 
-        with patch(f"{_OTB_APP}.shutil.which", return_value=_FAKE_CLI), \
+        with patch(f"{_OTB_APP}.which_otb", return_value=_FAKE_CLI), \
              patch(f"{_OTB_APP}.subprocess.run", return_value=_mock_proc()):
             result = OrthoRectifyStep().execute([src], tmp_path / "out", ref=ref)
 
@@ -355,7 +427,7 @@ class TestOrthoRectifyExecute:
         src = _geographic_raster(tmp_path, "src.tif")
         out_dir = tmp_path / "out"
 
-        with patch(f"{_OTB_APP}.shutil.which", return_value=_FAKE_CLI), \
+        with patch(f"{_OTB_APP}.which_otb", return_value=_FAKE_CLI), \
              patch(f"{_OTB_APP}.subprocess.run", return_value=_mock_proc()):
             result = OrthoRectifyStep().execute([src], out_dir, ref=ref)
 
@@ -365,7 +437,7 @@ class TestOrthoRectifyExecute:
         ref = _geographic_raster(tmp_path, "ref.tif")
         src = _geographic_raster(tmp_path, "src.tif")
 
-        with patch(f"{_OTB_APP}.shutil.which", return_value=None):
+        with patch(f"{_OTB_APP}.which_otb", return_value=None):
             with pytest.raises(RuntimeError, match="not found on PATH"):
                 OrthoRectifyStep().execute([src], tmp_path / "out", ref=ref)
 
@@ -373,7 +445,7 @@ class TestOrthoRectifyExecute:
         ref = _geographic_raster(tmp_path, "ref.tif")
         src = _geographic_raster(tmp_path, "src.tif")
 
-        with patch(f"{_OTB_APP}.shutil.which", return_value=_FAKE_CLI), \
+        with patch(f"{_OTB_APP}.which_otb", return_value=_FAKE_CLI), \
              patch(f"{_OTB_APP}.subprocess.run", return_value=_mock_proc(1, "OTB error")):
             with pytest.raises(RuntimeError, match="failed"):
                 OrthoRectifyStep().execute([src], tmp_path / "out", ref=ref)
@@ -383,7 +455,7 @@ class TestOrthoRectifyExecute:
         src = _geographic_raster(tmp_path, "src.tif")
         out_dir = tmp_path / "deep" / "nested" / "out"
 
-        with patch(f"{_OTB_APP}.shutil.which", return_value=_FAKE_CLI), \
+        with patch(f"{_OTB_APP}.which_otb", return_value=_FAKE_CLI), \
              patch(f"{_OTB_APP}.subprocess.run", return_value=_mock_proc()):
             OrthoRectifyStep().execute([src], out_dir, ref=ref)
 
@@ -393,7 +465,7 @@ class TestOrthoRectifyExecute:
         ref = _geographic_raster(tmp_path, "ref.tif")
         src = _geographic_raster(tmp_path, "src.tif")
 
-        with patch(f"{_OTB_APP}.shutil.which", return_value=_FAKE_CLI), \
+        with patch(f"{_OTB_APP}.which_otb", return_value=_FAKE_CLI), \
              patch(f"{_OTB_APP}.subprocess.run", return_value=_mock_proc()):
             step_output = OrthoRectifyStep().execute([src], tmp_path / "out", ref=ref)
 
@@ -557,14 +629,14 @@ _FAKE_SAR_CLI = "/usr/bin/otbcli_SARCalibration"
 class TestSARCalibrationExecute:
     def test_execute_calls_sar_calibration(self, tmp_path):
         src = _geographic_raster(tmp_path, "src.tif")
-        with patch(f"{_OTB_APP}.shutil.which", return_value=_FAKE_SAR_CLI), \
+        with patch(f"{_OTB_APP}.which_otb", return_value=_FAKE_SAR_CLI), \
              patch(f"{_OTB_APP}.subprocess.run", return_value=_mock_proc()) as mock_run:
             SARCalibrationStep().execute([src], tmp_path / "out")
         assert mock_run.call_args[0][0][0] == "otbcli_SARCalibration"
 
     def test_compress_default_appends_gdal_suffix(self, tmp_path):
         src = _geographic_raster(tmp_path, "src.tif")
-        with patch(f"{_OTB_APP}.shutil.which", return_value=_FAKE_SAR_CLI), \
+        with patch(f"{_OTB_APP}.which_otb", return_value=_FAKE_SAR_CLI), \
              patch(f"{_OTB_APP}.subprocess.run", return_value=_mock_proc()) as mock_run:
             SARCalibrationStep().execute([src], tmp_path / "out")
         cmd = mock_run.call_args[0][0]
@@ -573,7 +645,7 @@ class TestSARCalibrationExecute:
 
     def test_compress_false_plain_path(self, tmp_path):
         src = _geographic_raster(tmp_path, "src.tif")
-        with patch(f"{_OTB_APP}.shutil.which", return_value=_FAKE_SAR_CLI), \
+        with patch(f"{_OTB_APP}.which_otb", return_value=_FAKE_SAR_CLI), \
              patch(f"{_OTB_APP}.subprocess.run", return_value=_mock_proc()) as mock_run:
             SARCalibrationStep().execute([src], tmp_path / "out", compress=False)
         cmd = mock_run.call_args[0][0]
@@ -582,7 +654,7 @@ class TestSARCalibrationExecute:
 
     def test_execute_returns_step_output(self, tmp_path):
         src = _geographic_raster(tmp_path, "src.tif")
-        with patch(f"{_OTB_APP}.shutil.which", return_value=_FAKE_SAR_CLI), \
+        with patch(f"{_OTB_APP}.which_otb", return_value=_FAKE_SAR_CLI), \
              patch(f"{_OTB_APP}.subprocess.run", return_value=_mock_proc()):
             result = SARCalibrationStep().execute([src], tmp_path / "out")
         assert isinstance(result, StepOutput)
@@ -591,7 +663,7 @@ class TestSARCalibrationExecute:
     def test_execute_output_path_prefixed(self, tmp_path):
         src = _geographic_raster(tmp_path, "src.tif")
         out_dir = tmp_path / "out"
-        with patch(f"{_OTB_APP}.shutil.which", return_value=_FAKE_SAR_CLI), \
+        with patch(f"{_OTB_APP}.which_otb", return_value=_FAKE_SAR_CLI), \
              patch(f"{_OTB_APP}.subprocess.run", return_value=_mock_proc()):
             result = SARCalibrationStep().execute([src], out_dir)
         assert result.outputs[0].path == out_dir / "sar_calibrate_src.tif"
@@ -701,7 +773,7 @@ class TestSARBorderCutExecute:
         data[:, -10:] = 0
         src = _write_s1_like_raster(tmp_path / "bordered.tif", data)
 
-        with patch(f"{_OTB_APP}.shutil.which", return_value="/usr/bin/otbcli_ResetMargin"), \
+        with patch(f"{_OTB_APP}.which_otb", return_value="/usr/bin/otbcli_ResetMargin"), \
              patch(f"{_OTB_APP}.subprocess.run", return_value=_mock_proc()) as mock_run:
             SARBorderCutStep().execute([src], tmp_path / "out")
 
@@ -713,7 +785,7 @@ class TestSARBorderCutExecute:
         data = np.ones((64, 64), dtype=np.uint16) * 100
         src = _write_s1_like_raster(tmp_path / "clean.tif", data)
 
-        with patch(f"{_OTB_APP}.shutil.which", return_value="/usr/bin/otbcli_ResetMargin"), \
+        with patch(f"{_OTB_APP}.which_otb", return_value="/usr/bin/otbcli_ResetMargin"), \
              patch(f"{_OTB_APP}.subprocess.run", return_value=_mock_proc()) as mock_run:
             SARBorderCutStep().execute(
                 [src], tmp_path / "out",
