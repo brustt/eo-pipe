@@ -1,0 +1,212 @@
+"""Tests for StackTilesStep — Aligned rasters in, one NetCDF Tile stack per Tile out."""
+
+from pathlib import Path
+
+import numpy as np
+import pytest
+import rasterio as rio
+import rioxarray  # noqa: F401  (registers the .rio accessor)
+import xarray as xr
+
+from eo_pipe.steps.raster.align_tile import AlignToTileStep
+from eo_pipe.steps.raster.stack_tiles import StackTilesStep
+from tests.test_steps.test_align_to_tile import make_raster
+
+
+def align(inputs, out_dir, grid, **params):
+    return AlignToTileStep().execute(list(inputs), out_dir, grid_path=grid, **params).flush_all().outputs
+
+
+def stack(paths, out_dir, **params):
+    result = StackTilesStep().execute(list(paths), out_dir, **params).flush_all()
+    return result.outputs
+
+
+@pytest.fixture()
+def aligned_dir(tmp_path):
+    d = tmp_path / "aligned"
+    d.mkdir()
+    return d
+
+
+@pytest.fixture()
+def src_dir(tmp_path):
+    d = tmp_path / "src"
+    d.mkdir()
+    return d
+
+
+class TestGroupingAndStructure:
+    def test_one_file_per_tile_with_time_and_polarization(self, src_dir, aligned_dir, output_dir, tile_grid):
+        srcs = [
+            make_raster(src_dir / "s_20250326T051233_vv.tif", 310000.0, 4890000.0),
+            make_raster(src_dir / "s_20250314T051233_vv.tif", 310000.0, 4890000.0),
+            make_raster(src_dir / "s_20250314T051233_vh.tif", 310000.0, 4890000.0),
+        ]
+        outs = stack(align(srcs, aligned_dir, tile_grid), output_dir)
+        assert [p.name for p in outs] == ["stack_31TCJ.nc"]
+        ds = xr.open_dataset(outs[0])
+        assert set(ds.data_vars) == {"VV", "VH"}
+        assert ds.sizes["time"] == 2 and ds.sizes["x"] == 64 and ds.sizes["y"] == 64
+
+    def test_time_axis_is_chronological_whatever_the_input_order(self, src_dir, aligned_dir, output_dir, tile_grid):
+        late = make_raster(src_dir / "s_20250326_vv.tif", 310000.0, 4890000.0, fill=np.full((1, 64, 64), 7, "float32"))
+        early = make_raster(src_dir / "s_20250314_vv.tif", 310000.0, 4890000.0, fill=np.full((1, 64, 64), 3, "float32"))
+        out = stack(align([late, early], aligned_dir, tile_grid), output_dir)[0]
+        ds = xr.open_dataset(out)
+        assert list(ds.time.values) == [np.datetime64("2025-03-14"), np.datetime64("2025-03-26")]
+        assert float(ds.VV.isel(time=0).mean()) == 3.0
+        assert float(ds.VV.isel(time=1).mean()) == 7.0
+
+    def test_scene_in_two_tiles_gives_two_stacks(self, src_dir, aligned_dir, output_dir, tile_grid):
+        a = make_raster(src_dir / "a_20250314_vv.tif", 409400.0, 4890000.0)
+        b = make_raster(src_dir / "b_20250326_vv.tif", 409400.0, 4890000.0)
+        outs = stack(align([a, b], aligned_dir, tile_grid), output_dir)
+        assert sorted(p.name for p in outs) == ["stack_31TCJ.nc", "stack_31TDJ.nc"]
+
+    def test_crs_is_readable_with_rioxarray(self, src_dir, aligned_dir, output_dir, tile_grid):
+        s = make_raster(src_dir / "a_20250314_vv.tif", 310000.0, 4890000.0)
+        ds = xr.open_dataset(stack(align([s], aligned_dir, tile_grid), output_dir)[0])
+        assert ds.rio.crs.to_epsg() == 32631
+        assert ds.x.values[0] == 310005.0  # pixel centre of the first column
+
+
+class TestExtent:
+    def _two_dates(self, src_dir, aligned_dir, tile_grid):
+        a = make_raster(src_dir / "a_20250314_vv.tif", 310000.0, 4890000.0)
+        b = make_raster(src_dir / "b_20250326_vv.tif", 310100.0, 4890000.0)  # shifted 10 px east
+        return align([a, b], aligned_dir, tile_grid)
+
+    def test_intersection_by_default(self, src_dir, aligned_dir, output_dir, tile_grid):
+        ds = xr.open_dataset(stack(self._two_dates(src_dir, aligned_dir, tile_grid), output_dir)[0])
+        assert ds.sizes["x"] == 54
+        assert not ds.VV.isnull().any()
+
+    def test_union_pads_with_nodata(self, src_dir, aligned_dir, output_dir, tile_grid):
+        ds = xr.open_dataset(stack(self._two_dates(src_dir, aligned_dir, tile_grid), output_dir, union=True)[0])
+        assert ds.sizes["x"] == 74
+        assert bool(ds.VV.isel(time=0, x=slice(64, None)).isnull().all())
+        assert bool(ds.VV.isel(time=1, x=slice(0, 10)).isnull().all())
+
+
+class TestMetadata:
+    def test_dataset_keeps_tile_resolution_sources_and_tags(self, src_dir, aligned_dir, output_dir, tile_grid):
+        s = make_raster(src_dir / "a_20250314_vv.tif", 310000.0, 4890000.0, tags={"orbit": "ascending"})
+        ds = xr.open_dataset(stack(align([s], aligned_dir, tile_grid), output_dir)[0])
+        assert ds.attrs["tile"] == "31TCJ"
+        assert ds.attrs["resolution"] == 10.0
+        assert "a_20250314_vv" in ds.attrs["sources"]
+        assert "ascending" in ds.attrs["source_tags"]
+        assert "resolution" in ds.attrs["align_params"]
+
+    def test_multiband_input_uses_band_descriptions_as_variables(self, src_dir, aligned_dir, output_dir, tile_grid):
+        s = make_raster(src_dir / "a_20250314.tif", 310000.0, 4890000.0, count=2, descriptions=["VV", "VH"])
+        ds = xr.open_dataset(stack(align([s], aligned_dir, tile_grid), output_dir)[0])
+        assert set(ds.data_vars) == {"VV", "VH"}
+
+    def test_undescribed_bands_are_named_band_n(self, src_dir, aligned_dir, output_dir, tile_grid):
+        s = make_raster(src_dir / "a_20250314.tif", 310000.0, 4890000.0, count=2)
+        ds = xr.open_dataset(stack(align([s], aligned_dir, tile_grid), output_dir)[0])
+        assert set(ds.data_vars) == {"band_1", "band_2"}
+
+
+class TestFilenameFallback:
+    def test_untagged_files_are_grouped_by_filename(self, aligned_dir, output_dir):
+        for token in ("20250314T051233", "20250326T051233"):
+            make_raster(aligned_dir / f"align_31TCJ_{token}_s_{token}_vv.tif", 310000.0, 4890000.0)
+        outs = stack(sorted(aligned_dir.glob("*.tif")), output_dir)
+        ds = xr.open_dataset(outs[0])
+        assert ds.sizes["time"] == 2
+        assert "VV" in ds.data_vars   # polarization from the stem suffix
+
+    def test_no_tags_and_no_contract_name_raises_naming_the_file(self, aligned_dir, output_dir):
+        bad = make_raster(aligned_dir / "mystery.tif", 310000.0, 4890000.0)
+        with pytest.raises(ValueError, match="mystery.tif"):
+            stack([bad], output_dir)
+
+
+class TestGuards:
+    def test_mixed_resolution_raises(self, src_dir, aligned_dir, output_dir, tile_grid):
+        a = make_raster(src_dir / "a_20250314_vv.tif", 310000.0, 4890000.0)
+        b = make_raster(src_dir / "b_20250326_vv.tif", 310000.0, 4890000.0)
+        outs = align([a], aligned_dir, tile_grid) + align([b], aligned_dir, tile_grid, resolution=20.0)
+        with pytest.raises(ValueError, match="resolution"):
+            stack(outs, output_dir)
+
+    def test_duplicate_date_and_variable_raises(self, src_dir, aligned_dir, output_dir, tile_grid):
+        a = make_raster(src_dir / "a_20250314_vv.tif", 310000.0, 4890000.0)
+        b = make_raster(src_dir / "b_20250314_vv.tif", 310000.0, 4890000.0)
+        with pytest.raises(ValueError, match="duplicate"):
+            stack(align([a, b], aligned_dir, tile_grid), output_dir)
+
+    def test_off_lattice_inputs_raise(self, aligned_dir, output_dir):
+        a = make_raster(aligned_dir / "align_31TCJ_20250314_s_vv.tif", 310000.0, 4890000.0)
+        b = make_raster(aligned_dir / "align_31TCJ_20250326_s_vv.tif", 310003.0, 4890000.0)
+        with pytest.raises(ValueError, match="lattice"):
+            stack([a, b], output_dir)
+
+    def test_disjoint_intersection_raises(self, aligned_dir, output_dir):
+        a = make_raster(aligned_dir / "align_31TCJ_20250314_s_vv.tif", 310000.0, 4890000.0)
+        b = make_raster(aligned_dir / "align_31TCJ_20250326_s_vv.tif", 320000.0, 4890000.0)
+        with pytest.raises(ValueError, match="overlap"):
+            stack([a, b], output_dir)
+
+
+class TestRegistration:
+    def test_registered_by_name(self):
+        from eo_pipe.pipeline.registry import StepRegistry
+
+        assert StackTilesStep.name == "stack_tiles"
+        assert "stack_tiles" in StepRegistry.available()
+
+
+class TestPipeline:
+    def test_align_then_stack_in_a_composition(self, src_dir, tmp_path, tile_grid):
+        from eo_pipe import MergeBatch, ParallelBatch, PipelineComposition
+
+        srcs = [
+            make_raster(src_dir / "s_20250314T051233_vv.tif", 310000.0, 4890000.0),
+            make_raster(src_dir / "s_20250326T051233_vv.tif", 310037.0, 4890011.0),
+        ]
+        ctx = (
+            PipelineComposition(workspace=tmp_path / "run")
+            .add_step("align_to_tile", ParallelBatch(), grid_path=tile_grid)
+            .add_step("stack_tiles", MergeBatch())
+            .run(inputs=srcs, save_intermediate=True)
+        )
+        assert [p.name for p in ctx.inputs] == ["stack_31TCJ.nc"]
+        ds = xr.open_dataset(ctx.inputs[0])
+        assert ds.sizes["time"] == 2
+
+
+class TestMoreGuards:
+    def test_mixed_crs_raises(self, aligned_dir, output_dir):
+        a = make_raster(aligned_dir / "align_31TCJ_20250314_s_vv.tif", 310000.0, 4890000.0)
+        b = make_raster(aligned_dir / "align_31TCJ_20250326_s_vv.tif", 310000.0, 4890000.0, crs="EPSG:32632")
+        with pytest.raises(ValueError, match="CRS"):
+            stack([a, b], output_dir)
+
+    def test_mixed_dtype_raises(self, aligned_dir, output_dir):
+        a = make_raster(aligned_dir / "align_31TCJ_20250314_s_vv.tif", 310000.0, 4890000.0)
+        b = make_raster(
+            aligned_dir / "align_31TCJ_20250326_s_vv.tif", 310000.0, 4890000.0,
+            dtype="uint8", fill=np.full((1, 64, 64), 3, "uint8"),
+        )
+        with pytest.raises(ValueError, match="dtype"):
+            stack([a, b], output_dir)
+
+    def test_mixed_nodata_raises(self, aligned_dir, output_dir):
+        a = make_raster(aligned_dir / "align_31TCJ_20250314_s_vv.tif", 310000.0, 4890000.0)
+        b = make_raster(aligned_dir / "align_31TCJ_20250326_s_vv.tif", 310000.0, 4890000.0, nodata=-1.0)
+        with pytest.raises(ValueError, match="nodata"):
+            stack([a, b], output_dir)
+
+
+class TestXarrayOutput:
+    def test_flush_writes_a_netcdf_file(self, tmp_path):
+        from eo_pipe.io.output_types import XarrayOutput
+
+        ds = xr.Dataset({"VV": (("y", "x"), np.ones((2, 3), "float32"))})
+        path = XarrayOutput(ds=ds, path=tmp_path / "sub" / "out.nc").flush()
+        assert path.exists()
+        assert xr.open_dataset(path).VV.shape == (2, 3)

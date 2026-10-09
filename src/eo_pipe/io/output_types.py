@@ -29,12 +29,15 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TYPE_CHECKING, Protocol, runtime_checkable
+from typing import Any, TYPE_CHECKING, Optional, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 import geopandas as gpd
+import rasterio as rio
 
 if TYPE_CHECKING:
+    import xarray as xr
+
     from eo_pipe.io.raster_io import RasterWriter
 
 
@@ -155,16 +158,27 @@ class RasterOutput:
         path: Intended output path.
         meta: Rasterio profile keyword arguments forwarded to the writer.
         writer: Writer instance injected by the step from ``self._writer``.
+        tags: Dataset-level GeoTIFF tags written after the raster.
+        descriptions: Per-band descriptions written after the raster.
     """
 
     data: np.ndarray
     path: Path
     meta: dict[str, Any]
     writer: "RasterWriter"
+    tags: Optional[dict[str, str]] = None
+    descriptions: Optional[Sequence[Optional[str]]] = None
 
     def flush(self) -> Path:
         """Write *data* to *path* via *writer* and return the resolved path."""
-        return self.writer.write(self.path, self.data, **self.meta)
+        path = self.writer.write(self.path, self.data, **self.meta)
+        if self.tags or self.descriptions:
+            with rio.open(path, "r+") as dst:
+                if self.tags:
+                    dst.update_tags(**self.tags)
+                if self.descriptions:
+                    dst.descriptions = tuple(self.descriptions)
+        return path
 
 
 @dataclass
@@ -219,4 +233,23 @@ class FlushedOutput:
 
     def flush(self) -> Path:
         """Return the path — the file is already on disk."""
+        return self.path
+
+
+@dataclass
+class XarrayOutput:
+    """In-memory ``xarray.Dataset`` that writes a NetCDF file on flush.
+
+    Args:
+        ds: The Dataset to persist.
+        path: Intended output path (``.nc``).
+    """
+
+    ds: "xr.Dataset"
+    path: Path
+
+    def flush(self) -> Path:
+        """Write *ds* to *path* as NetCDF4 and return the path."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.ds.to_netcdf(self.path, engine="netcdf4")
         return self.path

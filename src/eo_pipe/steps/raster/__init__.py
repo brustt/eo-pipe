@@ -1,3 +1,4 @@
+from .align_tile import AlignToTileStep
 from .calibrate import HistogramCalibrationStep
 from .clip import ClipStep
 from .filter import FilterStep
@@ -7,8 +8,10 @@ from .resample import ResampleStep
 from .s1_extract import S1ExtractStep
 from .s1_geocode import S1GeocodeStep
 from .sieve import SieveStep
+from .stack_tiles import StackTilesStep
 
 __all__ = [
+    "AlignToTileStep",
     "ResampleStep",
     "ClipStep",
     "MergeRasterStep",
@@ -18,4 +21,5 @@ __all__ = [
     "HillshadeStep",
     "S1ExtractStep",
     "S1GeocodeStep",
+    "StackTilesStep",
 ]

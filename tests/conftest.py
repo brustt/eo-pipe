@@ -138,3 +138,41 @@ def output_dir(tmp_path: Path) -> Path:
     out = tmp_path / "outputs"
     out.mkdir()
     return out
+
+
+# ---------------------------------------------------------------------------
+# Synthetic Sentinel-2 Tile grid
+# ---------------------------------------------------------------------------
+
+#: name -> (epsg, upper-left x, upper-left y) — real Sentinel-2 tile origins.
+SYNTHETIC_TILES = {
+    "31TCJ": (32631, 300000.0, 4900020.0),
+    "31TDJ": (32631, 399960.0, 4900020.0),
+    "32TLR": (32632, 300000.0, 5100000.0),
+}
+TILE_SIZE = 109_800.0
+
+
+def write_tile_grid(path: Path, tiles: Optional[Dict] = None) -> Path:
+    """Write a tiny Sentinel-2 style grid parquet (``Name`` + EPSG:4326 footprint)."""
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    tiles = tiles or SYNTHETIC_TILES
+    names, geoms = [], []
+    for name, (epsg, ulx, uly) in tiles.items():
+        utm_box = gpd.GeoSeries(
+            [box(ulx, uly - TILE_SIZE, ulx + TILE_SIZE, uly)], crs=f"EPSG:{epsg}"
+        )
+        names.append(name)
+        geoms.append(utm_box.to_crs(4326).iloc[0])
+    gdf = gpd.GeoDataFrame({"Name": names}, geometry=geoms, crs="EPSG:4326")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    gdf.to_parquet(path)
+    return path
+
+
+@pytest.fixture()
+def tile_grid(tmp_path: Path) -> Path:
+    """Synthetic grid with tiles 31TCJ, 31TDJ (zone 31) and 32TLR (zone 32)."""
+    return write_tile_grid(tmp_path / "grid" / "tiles.parquet")

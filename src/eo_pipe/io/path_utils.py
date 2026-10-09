@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+from eo_pipe.io.aligned import aligned_name
+
 
 class PathStrategy(ABC):
     """Generates an output file path for a single step execution."""
@@ -76,3 +78,25 @@ class NamedPathStrategy(PathStrategy):
         output_dir: Path,
     ) -> Path:
         return output_dir / f"{step_name}{self._ext}"
+
+
+class TilePathStrategy(PathStrategy):
+    """Aligned-raster naming: ``{output_dir}/align_{tile}_{datetime}_{input_stem}.tif``.
+
+    The tile and datetime token are fixed at construction, so a new instance is
+    built per (tile, input).  ``step_name`` and ``batch_index`` are ignored; the
+    name follows the contract parsed by :func:`eo_pipe.io.aligned.parse_aligned_name`.
+    """
+
+    def __init__(self, tile: str, token: str) -> None:
+        self._tile = tile
+        self._token = token
+
+    def resolve(
+        self,
+        step_name: str,
+        input_path: Path,
+        batch_index: int,
+        output_dir: Path,
+    ) -> Path:
+        return output_dir / aligned_name(self._tile, self._token, input_path.stem)
