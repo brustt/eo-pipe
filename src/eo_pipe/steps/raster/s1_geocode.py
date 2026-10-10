@@ -8,6 +8,7 @@ from typing import Any, List, Optional
 import rasterio
 
 from eo_pipe.io.output_types import FlushedOutput
+from eo_pipe.io.tiles import utm_epsg
 from eo_pipe.io.path_utils import PrefixedPathStrategy
 from eo_pipe.logging import setup_logger
 from eo_pipe.pipeline.base import StepBase, StepOutput
@@ -29,9 +30,7 @@ def _auto_utm_crs(inp: Path) -> str:
         return "EPSG:4326"
     centre_lon = sum(g.x for g in gcps) / len(gcps)
     centre_lat = sum(g.y for g in gcps) / len(gcps)
-    zone = int((centre_lon + 180) / 6) + 1
-    epsg = 32600 + zone if centre_lat >= 0 else 32700 + zone
-    return f"EPSG:{epsg}"
+    return f"EPSG:{utm_epsg(centre_lon, centre_lat)}"
 
 
 @StepRegistry.register

@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 from shapely.geometry import box
 
-from eo_pipe.io.tiles import S2_TILE_GRID_PATH, find_tiles, tile_epsg
+import geopandas as gpd
+
+from eo_pipe.io.tiles import S2_TILE_GRID_PATH, best_tile, find_tiles, tile_epsg, utm_epsg, utm_zone
 
 
 class TestTileEpsg:
@@ -52,3 +54,45 @@ class TestRealGrid:
         tiles = {t.name: t for t in find_tiles(box(1.2, 43.9, 2.61, 43.91), S2_TILE_GRID_PATH)}
         assert (tiles["31TCJ"].ul_x, tiles["31TCJ"].ul_y) == (300000.0, 4900020.0)
         assert (tiles["31TDJ"].ul_x, tiles["31TDJ"].ul_y) == (399960.0, 4900020.0)
+
+
+class TestUtmZone:
+    @pytest.mark.parametrize(
+        "lon, lat, epsg",
+        [(1.2, 43.9, 32631), (-179.9, 10, 32601), (179.9, 10, 32660), (180.0, 10, 32601),
+         (9.0, -33.0, 32732)],
+    )
+    def test_utm_epsg(self, lon, lat, epsg):
+        assert utm_epsg(lon, lat) == epsg
+
+    @pytest.mark.parametrize(
+        "epsg, expected",
+        [(32631, (31, True)), (32755, (55, False)), (4326, None), (2154, None), (32600, None)],
+    )
+    def test_utm_zone(self, epsg, expected):
+        assert utm_zone(epsg) == expected
+
+    def test_round_trip_with_tile_epsg(self):
+        assert utm_epsg(1.2, 43.9) == tile_epsg("31TCJ")
+
+
+class TestBestTile:
+    def test_picks_largest_overlap(self, tile_grid, tmp_path):
+        aoi = tmp_path / "aoi.gpkg"
+        gpd.GeoDataFrame(geometry=[box(1.2, 43.9, 1.21, 43.91)], crs=4326).to_file(aoi, driver="GPKG")
+        tile = best_tile(aoi, tile_grid)
+        assert tile.name == "31TCJ"
+        assert tile.crs.to_epsg() == 32631
+
+    def test_no_intersection_raises(self, tile_grid, tmp_path):
+        aoi = tmp_path / "aoi.gpkg"
+        gpd.GeoDataFrame(geometry=[box(-150, -80, -149.9, -79.9)], crs=4326).to_file(aoi, driver="GPKG")
+        with pytest.raises(ValueError, match="intersects the study area"):
+            best_tile(aoi, tile_grid)
+
+    def test_corners_wgs84_surround_the_tile(self, tile_grid, tmp_path):
+        aoi = tmp_path / "aoi.gpkg"
+        gpd.GeoDataFrame(geometry=[box(1.2, 43.9, 1.21, 43.91)], crs=4326).to_file(aoi, driver="GPKG")
+        ul, ur, lr, ll = best_tile(aoi, tile_grid).corners_wgs84
+        assert ul[0] == ll[0] < 1.2 < ur[0] == lr[0]
+        assert ul[1] == ur[1] > 43.91 > ll[1] == lr[1]

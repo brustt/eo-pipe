@@ -10,7 +10,7 @@ import rasterio.warp
 from rasterio.coords import BoundingBox
 
 from eo_pipe.io.lattice import Lattice, intersect
-from eo_pipe.steps.utils import CxPolygon
+from eo_pipe.io.tiles import CxPolygon, utm_epsg, utm_zone
 from eo_pipe.pipeline.registry import StepRegistry
 from eo_pipe.steps.otb.base import OTBStepBase
 
@@ -232,8 +232,7 @@ def _grid_from_extent(
     lons = [pt[0] for pt in extent]
     lats = [pt[1] for pt in extent]
     if epsg is None:
-        zone = int((sum(lons) / len(lons) + 180) // 6) % 60 + 1
-        epsg = (32600 if sum(lats) / len(lats) >= 0 else 32700) + zone
+        epsg = utm_epsg(sum(lons) / len(lons), sum(lats) / len(lats))
     crs = rasterio.crs.CRS.from_epsg(epsg)
     left, bottom, right, top = rasterio.warp.transform_bounds(
         "EPSG:4326", crs, min(lons), min(lats), max(lons), max(lats)
@@ -261,10 +260,9 @@ def _map_projection_params(crs: rasterio.crs.CRS) -> Dict[str, Any]:
     epsg = crs.to_epsg()
 
     if epsg is not None:
-        if 32601 <= epsg <= 32660:
-            return {"map": "utm", "map.utm.zone": epsg - 32600, "map.utm.northhem": True}
-        if 32701 <= epsg <= 32760:
-            return {"map": "utm", "map.utm.zone": epsg - 32700, "map.utm.northhem": False}
+        utm = utm_zone(epsg)
+        if utm is not None:
+            return {"map": "utm", "map.utm.zone": utm[0], "map.utm.northhem": utm[1]}
         return {"map": "epsg", "map.epsg.code": epsg}
 
     raise ValueError(
