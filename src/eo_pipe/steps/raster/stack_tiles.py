@@ -14,16 +14,7 @@ import rioxarray  # noqa: F401  (registers the .rio accessor)
 import xarray as xr
 from rasterio.crs import CRS
 
-from eo_pipe.io.aligned import (
-    TAG_DATETIME,
-    TAG_PARAMS,
-    TAG_POLARIZATION,
-    TAG_TILE,
-    iso_to_datetime64,
-    parse_aligned_name,
-    polarization_from_stem,
-    token_to_iso,
-)
+from eo_pipe.io.aligned import TAG_PARAMS, identify, iso_to_datetime64
 from eo_pipe.io.lattice import Lattice
 from eo_pipe.io.output_types import XarrayOutput
 from eo_pipe.io.path_utils import NamedPathStrategy
@@ -62,36 +53,15 @@ class _Member:
 
 
 def _describe(path: Path) -> _Member:
-    parsed = parse_aligned_name(path.name)
     with rio.open(path) as src:
-        tags = dict(src.tags())
-        descriptions = list(src.descriptions)
         t = src.transform
         if t.b != 0 or t.d != 0 or t.e >= 0 or abs(t.a + t.e) > 1e-9:
             raise ValueError(f"{path.name}: expected a north-up raster with square pixels.")
-        tile = tags.get(TAG_TILE) or (parsed.tile if parsed else None)
-        if tags.get(TAG_DATETIME):
-            iso = tags[TAG_DATETIME]
-        elif parsed:
-            iso = token_to_iso(parsed.token)
-        else:
-            iso = None
-        if not tile or not iso:
-            raise ValueError(
-                f"{path.name}: no TILE/DATETIME tags and the filename does not follow "
-                "'align_<TILE>_<datetime>_<stem>.tif'."
-            )
-        pol = tags.get(TAG_POLARIZATION)
-        if pol is None and not tags.get(TAG_TILE) and src.count == 1 and parsed:
-            pol = polarization_from_stem(parsed.stem)   # untagged file: filename fallback
-        if src.count == 1 and pol:
-            variables = [pol.upper()]
-        else:
-            variables = [d or f"band_{i}" for i, d in enumerate(descriptions, start=1)]
+        ident = identify(path.name, dict(src.tags()), src.count, list(src.descriptions))
         return _Member(
-            path=path, tile=tile, iso=iso, variables=variables, crs=src.crs, res=t.a,
-            left=t.c, top=t.f, width=src.width, height=src.height,
-            dtype=src.dtypes[0], nodata=src.nodata, tags=tags,
+            path=path, tile=ident.tile, iso=ident.iso, variables=ident.variables, crs=src.crs,
+            res=t.a, left=t.c, top=t.f, width=src.width, height=src.height,
+            dtype=src.dtypes[0], nodata=src.nodata, tags=ident.tags,
         )
 
 

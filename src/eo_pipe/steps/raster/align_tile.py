@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Union
@@ -20,15 +19,9 @@ from shapely.ops import transform as shp_transform
 
 from eo_pipe.io.aligned import (
     DEFAULT_DATE_PATTERN,
-    POLARIZATIONS,
-    TAG_DATETIME,
-    TAG_PARAMS,
-    TAG_POLARIZATION,
-    TAG_SOURCE,
-    TAG_TILE,
     datetime_token,
-    polarization_from_stem,
-    token_to_iso,
+    polarization_of,
+    tags_for,
 )
 from eo_pipe.io.lattice import Bounds, Lattice, intersect
 from eo_pipe.io.output_types import RasterOutput
@@ -176,19 +169,14 @@ class AlignToTileStep(StepBase):
             logger.info("%s: tile %s skipped (%d valid pixels)", inp.name, tile.name, n_valid)
             return None
 
-        tags = dict(src.tags())
-        tags.update({
-            TAG_TILE: tile.name,
-            TAG_DATETIME: token_to_iso(token),
-            TAG_SOURCE: inp.stem,
-            TAG_PARAMS: json.dumps({
+        tags = tags_for(
+            src.tags(), tile=tile.name, token=token, source=inp.stem,
+            params={
                 "resolution": res, "method": method, "aoi": params.get("aoi") is not None,
                 "full_tile": full_tile, "resampled": not fast,
-            }),
-        })
-        pol = self._polarization(src, inp, params.get("polarization"))
-        if pol:
-            tags[TAG_POLARIZATION] = pol
+            },
+            polarization=polarization_of(src.count, src.descriptions, inp.stem, params.get("polarization")),
+        )
 
         path = TilePathStrategy(tile.name, token).resolve(self.name, inp, 0, output_dir)
         meta = dict(
@@ -199,12 +187,3 @@ class AlignToTileStep(StepBase):
             data=dest, path=path, meta=meta, writer=self._writer, tags=tags,
             descriptions=src.descriptions if any(src.descriptions) else None,
         )
-
-    @staticmethod
-    def _polarization(src: rio.DatasetReader, inp: Path, override: Optional[str]) -> Optional[str]:
-        if override:
-            return override.upper()
-        if src.count != 1:
-            return None
-        desc = (src.descriptions[0] or "").upper()
-        return desc if desc in POLARIZATIONS else polarization_from_stem(inp.stem)
