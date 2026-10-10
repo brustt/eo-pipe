@@ -263,6 +263,29 @@ class TestBuildOtbParams:
         assert params["outputs.sizey"] == H
         assert params["outputs.ulx"] == pytest.approx(0.0)
 
+    def test_independent_sources_share_ref_pixel_grid(self, tmp_path):
+        ref = _geographic_raster(tmp_path, "ref.tif")  # res 0.01, origin (0, 0.64)
+        # Sources start at sub-pixel offsets from the ref lattice.
+        src_a = _write_raster(tmp_path / "a.tif", CRS.from_epsg(4326), bounds=(0.1234, 0.0, 0.7634, 0.64))
+        src_b = _write_raster(tmp_path / "b.tif", CRS.from_epsg(4326), bounds=(0.2071, 0.0, 0.8471, 0.64))
+        step = OrthoRectifyStep()
+        for src in (src_a, src_b):
+            p = step.build_otb_params([src], tmp_path / "out.tif", ref=ref)
+            assert (p["outputs.ulx"] - 0.0) / 0.01 == pytest.approx(round(p["outputs.ulx"] / 0.01))
+            right = p["outputs.ulx"] + p["outputs.sizex"] * 0.01
+            assert right / 0.01 == pytest.approx(round(right / 0.01))
+            assert p["outputs.uly"] == pytest.approx(0.64)
+
+    def test_ref_extent_grid_snapped_to_resolution(self, tmp_path):
+        src = _geographic_raster(tmp_path, "src.tif")
+        extent = ((0.1234, 0.5), (0.4567, 0.5), (0.4567, 0.1), (0.1234, 0.1))
+        p = OrthoRectifyStep().build_otb_params(
+            [src], tmp_path / "out.tif", ref_extent=extent, ref_epsg=4326, ref_resolution=0.01
+        )
+        assert p["outputs.ulx"] == pytest.approx(0.12)
+        assert p["outputs.sizex"] == 34  # 0.12 -> 0.46
+        assert p["outputs.sizey"] == 40
+
     def test_no_overlap_raises_value_error(self, tmp_path):
         ref = _geographic_raster(tmp_path, "ref.tif")  # bounds (0, 0, 0.64, 0.64)
         src = _write_raster(tmp_path / "src.tif", CRS.from_epsg(4326), bounds=(1.0, 1.0, 1.64, 1.64))
@@ -489,7 +512,7 @@ class TestOrthoRectifyOrthofit:
         assert params["outputs.mode"] == "orthofit"
         assert params["outputs.ortho"] == str(ref)
 
-    def test_orthofit_omits_explicit_grid_params(self, tmp_path):
+    def test_orthofit_omits_auto_grid_params(self, tmp_path):
         ref = _geographic_raster(tmp_path, "ref.tif")
         src = _geographic_raster(tmp_path, "src.tif")
         params = OrthoRectifyStep().build_otb_params(
@@ -535,14 +558,14 @@ class TestOrthoRectifyOrthofit:
                 [src], tmp_path / "out.tif", ref=ref, ref_mode="bad"
             )
 
-    def test_explicit_mode_default_unchanged(self, tmp_path):
+    def test_auto_mode_default_unchanged(self, tmp_path):
         ref = _geographic_raster(tmp_path, "ref.tif")
         src = _geographic_raster(tmp_path, "src.tif")
         params = OrthoRectifyStep().build_otb_params([src], tmp_path / "out.tif", ref=ref)
-        # explicit mode: no orthofit keys
+        # auto mode: no orthofit keys
         assert "outputs.mode" not in params
         assert "outputs.ortho" not in params
-        # explicit mode: grid keys present
+        # auto mode: grid keys present
         assert "outputs.ulx" in params
         assert "outputs.sizex" in params
 
@@ -574,7 +597,7 @@ class TestSARCalibrationBuildParams:
         params = SARCalibrationStep().build_otb_params([src], tmp_path / "out.tif")
         assert params["lut"] == "sigma"
         assert params["removenoise"] is False
-        assert params["opt.ram"] == 256
+        assert "opt.ram" not in params
         assert params["in"] == str(src)
         assert "out" not in params
 
@@ -605,12 +628,12 @@ class TestSARCalibrationBuildParams:
         )
         assert params["removenoise"] is True
 
-    def test_custom_ram(self, tmp_path):
+    def test_ram_mb_ignored(self, tmp_path):
         src = _geographic_raster(tmp_path, "src.tif")
         params = SARCalibrationStep().build_otb_params(
             [src], tmp_path / "out.tif", ram_mb=512
         )
-        assert params["opt.ram"] == 512
+        assert "opt.ram" not in params
 
     def test_multiple_inputs_raises(self, tmp_path):
         src1 = _geographic_raster(tmp_path, "s1.tif")

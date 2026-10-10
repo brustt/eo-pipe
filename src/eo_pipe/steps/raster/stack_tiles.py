@@ -24,6 +24,7 @@ from eo_pipe.io.aligned import (
     polarization_from_stem,
     token_to_iso,
 )
+from eo_pipe.io.lattice import Lattice
 from eo_pipe.io.output_types import XarrayOutput
 from eo_pipe.io.path_utils import NamedPathStrategy
 from eo_pipe.logging import setup_logger
@@ -31,8 +32,6 @@ from eo_pipe.pipeline.base import StepBase, StepOutput
 from eo_pipe.pipeline.registry import StepRegistry
 
 logger = setup_logger("eo_pipe.steps.raster.stack_tiles")
-
-_TOL = 1e-3  # pixels
 
 
 @dataclass
@@ -102,10 +101,6 @@ def _same_nodata(a: Optional[float], b: Optional[float]) -> bool:
     return a == b or (math.isnan(a) and math.isnan(b))
 
 
-def _whole(value: float) -> bool:
-    return abs(value - round(value)) < _TOL
-
-
 def _validate(tile: str, members: List[_Member]) -> None:
     ref = members[0]
     for m in members[1:]:
@@ -123,7 +118,7 @@ def _validate(tile: str, members: List[_Member]) -> None:
             raise ValueError(
                 f"Tile {tile}: mixed resolution ({ref.res} in {ref.path.name}, {m.res} in {m.path.name})."
             )
-        if not (_whole((m.left - ref.left) / ref.res) and _whole((m.top - ref.top) / ref.res)):
+        if not Lattice(ref.left, ref.top, ref.res).holds(m.left, m.top):
             raise ValueError(
                 f"Tile {tile}: {m.path.name} is not on the same lattice as {ref.path.name}."
             )
@@ -151,12 +146,20 @@ class StackTilesStep(StepBase):
             to their intersection. Default ``False``.
         nodata (float | None): Fill value for padded cells. Default: the first
             input's nodata, else ``0``.
+        time_bin (str | None): ``None`` (default) keeps one time step per exact
+            datetime. ``"day"`` combines inputs of the same calendar day into one
+            step (earliest datetime), e.g. consecutive slices of one pass; where
+            they overlap the first valid value wins. Only combine rasters you
+            already grouped (same relative orbit and orbit state).
     """
 
     name = "stack_tiles"
 
     def execute(self, inputs: List[Path], output_dir: Path, **params: Any) -> StepOutput:
         union = bool(params.get("union", False))
+        time_bin = params.get("time_bin")
+        if time_bin not in (None, "day"):
+            raise ValueError(f"time_bin must be None or 'day', got {time_bin!r}.")
         groups: Dict[str, List[_Member]] = {}
         for path in inputs:
             member = _describe(Path(path))
@@ -166,13 +169,18 @@ class StackTilesStep(StepBase):
         for tile in sorted(groups):
             members = groups[tile]
             _validate(tile, members)
-            ds = self._build(tile, members, union, params.get("nodata"))
+            ds = self._build(tile, members, union, params.get("nodata"), time_bin)
             path = NamedPathStrategy(".nc").resolve(f"stack_{tile}", Path(), 0, output_dir)
             outputs.append(XarrayOutput(ds=ds, path=path))
         return StepOutput(outputs=outputs)
 
     def _build(
-        self, tile: str, members: List[_Member], union: bool, nodata_param: Optional[float]
+        self,
+        tile: str,
+        members: List[_Member],
+        union: bool,
+        nodata_param: Optional[float],
+        time_bin: Optional[str],
     ) -> xr.Dataset:
         ref = members[0]
         res = ref.res
@@ -183,11 +191,14 @@ class StackTilesStep(StepBase):
         bottom = pick[0](m.bottom for m in members)
         if right - left <= 0 or top - bottom <= 0:
             raise ValueError(f"Tile {tile}: the inputs do not overlap; use union=True to pad them.")
-        width, height = round((right - left) / res), round((top - bottom) / res)
+        lattice = Lattice(left, top, res)
+        width, height = lattice.shape((left, bottom, right, top))
 
         nodata = nodata_param if nodata_param is not None else (ref.nodata if ref.nodata is not None else 0)
-        isos = sorted({m.iso for m in members})
-        time_index = {iso: i for i, iso in enumerate(isos)}
+        bin_of = (lambda iso: iso[:10]) if time_bin == "day" else (lambda iso: iso)
+        bins = sorted({bin_of(m.iso) for m in members})
+        time_index = {b: i for i, b in enumerate(bins)}
+        isos = [min(m.iso for m in members if bin_of(m.iso) == b) for b in bins]
         arrays: Dict[str, np.ndarray] = {}
         seen: set = set()
 
@@ -204,15 +215,16 @@ class StackTilesStep(StepBase):
                 seen.add(key)
                 if var not in arrays:
                     arrays[var] = np.full((len(isos), height, width), nodata, dtype=ref.dtype)
-                col0, row0 = round((m.left - left) / res), round((top - m.top) / res)
+                col0, row0 = lattice.offset(m.left, m.top)
                 c0, c1 = max(0, col0), min(width, col0 + m.width)
                 r0, r1 = max(0, row0), min(height, row0 + m.height)
                 if c0 >= c1 or r0 >= r1:
                     continue
                 block = data[band, r0 - row0 : r1 - row0, c0 - col0 : c1 - col0]
                 ok = valid[band, r0 - row0 : r1 - row0, c0 - col0 : c1 - col0]
-                target = arrays[var][time_index[m.iso], r0:r1, c0:c1]
-                target[ok] = block[ok]
+                target = arrays[var][time_index[bin_of(m.iso)], r0:r1, c0:c1]
+                free = ok & _nodata_mask(target, nodata)   # first valid value wins when slices overlap
+                target[free] = block[free]
 
         ds = xr.Dataset(
             {var: (("time", "y", "x"), arr) for var, arr in arrays.items()},

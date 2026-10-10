@@ -210,3 +210,42 @@ class TestXarrayOutput:
         path = XarrayOutput(ds=ds, path=tmp_path / "sub" / "out.nc").flush()
         assert path.exists()
         assert xr.open_dataset(path).VV.shape == (2, 3)
+
+
+class TestTimeBinning:
+    def _slices(self, src_dir):
+        left = np.zeros((1, 64, 64), "float32"); left[0, :, :32] = 4.0
+        right = np.zeros((1, 64, 64), "float32"); right[0, :, 32:] = 6.0
+        return [
+            make_raster(src_dir / "s_20250314T051208_vv.tif", 310000.0, 4890000.0, fill=left),
+            make_raster(src_dir / "s_20250314T051233_vv.tif", 310000.0, 4890000.0, fill=right),
+        ]
+
+    def test_slices_of_one_day_stay_separate_by_default(self, src_dir, aligned_dir, output_dir, tile_grid):
+        ds = xr.open_dataset(stack(align(self._slices(src_dir), aligned_dir, tile_grid), output_dir)[0])
+        assert ds.sizes["time"] == 2
+
+    def test_day_binning_combines_slices_into_one_time_step(self, src_dir, aligned_dir, output_dir, tile_grid):
+        outs = stack(align(self._slices(src_dir), aligned_dir, tile_grid), output_dir, time_bin="day")
+        ds = xr.open_dataset(outs[0])
+        assert ds.sizes["time"] == 1
+        assert ds.time.values[0] == np.datetime64("2025-03-14T05:12:08")   # earliest slice
+        row = ds.VV.isel(time=0, y=10).values
+        assert (row[:32] == 4.0).all() and (row[32:64] == 6.0).all()
+
+    def test_overlapping_slices_keep_the_first_valid_value(self, src_dir, aligned_dir, output_dir, tile_grid):
+        a = make_raster(src_dir / "s_20250314T051208_vv.tif", 310000.0, 4890000.0, fill=np.full((1, 64, 64), 4.0, "float32"))
+        b = make_raster(src_dir / "s_20250314T051233_vv.tif", 310000.0, 4890000.0, fill=np.full((1, 64, 64), 6.0, "float32"))
+        ds = xr.open_dataset(stack(align([a, b], aligned_dir, tile_grid), output_dir, time_bin="day")[0])
+        assert float(ds.VV.mean()) == 4.0
+
+    def test_different_days_remain_different_time_steps(self, src_dir, aligned_dir, output_dir, tile_grid):
+        a = make_raster(src_dir / "s_20250314T051208_vv.tif", 310000.0, 4890000.0)
+        b = make_raster(src_dir / "s_20250326T051208_vv.tif", 310000.0, 4890000.0)
+        ds = xr.open_dataset(stack(align([a, b], aligned_dir, tile_grid), output_dir, time_bin="day")[0])
+        assert ds.sizes["time"] == 2
+
+    def test_unknown_time_bin_raises(self, src_dir, aligned_dir, output_dir, tile_grid):
+        a = make_raster(src_dir / "s_20250314T051208_vv.tif", 310000.0, 4890000.0)
+        with pytest.raises(ValueError, match="time_bin"):
+            stack(align([a], aligned_dir, tile_grid), output_dir, time_bin="week")
