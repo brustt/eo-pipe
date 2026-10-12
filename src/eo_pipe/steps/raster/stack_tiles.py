@@ -222,7 +222,8 @@ class StackTilesStep(StepBase):
                     )
                 seen.add(key)
                 contributions.append((band, var_index.setdefault(var, len(var_index)), time_index[bin_of(m.iso)]))
-            entries.append((m, contributions))
+            if contributions:
+                entries.append((m, contributions))
 
         dtype = np.dtype(ref.dtype)
         plan = plan_chunks(budget, len(var_index) * len(isos) * dtype.itemsize, height, width)

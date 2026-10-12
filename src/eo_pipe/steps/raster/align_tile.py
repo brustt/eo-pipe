@@ -12,9 +12,7 @@ import numpy as np
 import rasterio as rio
 from affine import Affine
 from pyproj import Transformer
-from rasterio.crs import CRS
 from rasterio.enums import Resampling
-from rasterio.transform import from_origin
 from rasterio.warp import reproject, transform_bounds
 from rasterio.windows import Window
 from shapely.geometry import box
@@ -317,7 +315,7 @@ class AlignToTileStep(StepBase):
         windows = _plan_windows(target, opts.memory_budget_mb, self._writer.blockysize)
         logger.info(
             "%s: tile %s, %dx%d px in %d window(s) of up to %d rows",
-            inp.name, tile.name, target.width, target.height, len(windows), windows[0].height,
+            inp.name, tile.name, target.width, target.height, len(windows), max(w.height for w in windows),
         )
         n_valid = _count_valid(_window_producer(src, target, opts.method), windows, target.nodata, opts.min_valid_fraction)
         if n_valid == 0 or n_valid / (target.width * target.height) < opts.min_valid_fraction:
