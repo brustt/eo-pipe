@@ -1,5 +1,6 @@
 """Tests for StackTilesStep — Aligned rasters in, one NetCDF Tile stack per Tile out."""
 
+from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -249,3 +250,106 @@ class TestTimeBinning:
         a = make_raster(src_dir / "s_20250314T051208_vv.tif", 310000.0, 4890000.0)
         with pytest.raises(ValueError, match="time_bin"):
             stack(align([a], aligned_dir, tile_grid), output_dir, time_bin="week")
+
+
+def _assert_same_stack(a: Path, b: Path) -> None:
+    with xr.open_dataset(a) as da, xr.open_dataset(b) as db:
+        xr.testing.assert_identical(da, db)
+
+
+class TestMemoryBudget:
+    """A tiny Memory budget forces many chunks; content must not depend on it."""
+
+    TINY = 0.05  # MB: a handful of pixel rows/columns per chunk
+
+    @pytest.fixture()
+    def series(self, src_dir, aligned_dir, tile_grid):
+        srcs = []
+        for day, x0 in ((12, 310000.0), (14, 310200.0), (16, 310100.0)):
+            for pol in ("vv", "vh"):
+                srcs.append(make_raster(src_dir / f"s_202503{day}T051233_{pol}.tif", x0, 4890000.0))
+        return align(srcs, aligned_dir, tile_grid)
+
+    def test_tiny_budget_equals_large_budget_on_intersection(self, series, tmp_path):
+        big = stack(series, tmp_path / "big", memory_budget_mb=4096)[0]
+        small = stack(series, tmp_path / "small", memory_budget_mb=self.TINY)[0]
+        _assert_same_stack(big, small)
+
+    def test_tiny_budget_equals_large_budget_on_union(self, series, tmp_path):
+        big = stack(series, tmp_path / "big", union=True)[0]
+        small = stack(series, tmp_path / "small", union=True, memory_budget_mb=self.TINY)[0]
+        _assert_same_stack(big, small)
+        with xr.open_dataset(small) as ds:
+            assert ds.sizes["x"] > 64
+
+    def test_tiny_budget_equals_large_budget_with_overlapping_day_slices(self, src_dir, aligned_dir, tile_grid, tmp_path):
+        srcs = [
+            make_raster(src_dir / "s_20250314T051233_vv.tif", 310000.0, 4890000.0),
+            make_raster(src_dir / "s_20250314T051300_vv.tif", 310200.0, 4890000.0),
+        ]
+        series = align(srcs, aligned_dir, tile_grid)
+        big = stack(series, tmp_path / "big", union=True, time_bin="day")[0]
+        small = stack(series, tmp_path / "small", union=True, time_bin="day", memory_budget_mb=self.TINY)[0]
+        _assert_same_stack(big, small)
+        with xr.open_dataset(small) as ds:
+            assert ds.sizes["time"] == 1
+
+    def test_default_budget_is_accepted_and_content_is_unchanged(self, series, tmp_path):
+        out = stack(series, tmp_path / "o")[0]
+        with xr.open_dataset(out) as ds:
+            assert ds.VV.dims == ("time", "y", "x") and ds.attrs["nodata"] == 0.0
+
+
+class TestOutOfCore:
+    def _series(self, src_dir, aligned_dir, tile_grid, n=12, size=256):
+        srcs = [
+            make_raster(
+                src_dir / f"s_{date(2025, 1, 1) + timedelta(days=d):%Y%m%d}T051233_vv.tif", 310000.0, 4890000.0, size=size,
+                fill=np.full((1, size, size), d + 1, "float32"),
+            )
+            for d in range(n)
+        ]
+        return align(srcs, aligned_dir, tile_grid)
+
+    def test_budget_too_small_for_a_minimal_chunk_raises_naming_the_minimum(self, src_dir, aligned_dir, output_dir, tile_grid):
+        series = self._series(src_dir, aligned_dir, tile_grid, n=3, size=64)
+        with pytest.raises(ValueError, match=r"memory_budget_mb.*at least"):
+            StackTilesStep().execute(series, output_dir, memory_budget_mb=1e-6)
+
+    def test_peak_allocation_stays_well_under_the_stack_size(self, src_dir, aligned_dir, output_dir, tile_grid):
+        import tracemalloc
+
+        series = self._series(src_dir, aligned_dir, tile_grid, n=40, size=512)  # stack: 40 MiB
+        pending = StackTilesStep().execute(series, output_dir, memory_budget_mb=4)
+        tracemalloc.start()
+        try:
+            pending.flush_all()
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert peak < 20 * 2**20
+        with xr.open_dataset(output_dir / "stack_31TCJ.nc") as ds:
+            assert ds.sizes["time"] == 40
+
+    def test_stack_is_chunked_on_disk_with_the_full_time_axis(self, src_dir, aligned_dir, output_dir, tile_grid):
+        series = self._series(src_dir, aligned_dir, tile_grid, n=4, size=256)
+        out = stack(series, output_dir, memory_budget_mb=0.5)[0]
+        with xr.open_dataset(out) as ds:
+            chunks = ds.VV.encoding["chunksizes"]
+        assert chunks[0] == 4 and chunks[1] < 256
+
+    def test_validation_error_leaves_no_file(self, src_dir, aligned_dir, output_dir, tile_grid):
+        a = make_raster(src_dir / "s_20250314_vv.tif", 310000.0, 4890000.0)
+        b = make_raster(src_dir / "s_20250326_vv.tif", 310000.0, 4890000.0, dtype="float64", fill=np.ones((1, 64, 64)))
+        series = align([a, b], aligned_dir, tile_grid)
+        with pytest.raises(ValueError, match="dtype"):
+            stack(series, output_dir)
+        assert not list(output_dir.glob("*"))
+
+    def test_failed_write_leaves_no_valid_looking_stack(self, src_dir, aligned_dir, output_dir, tile_grid):
+        series = self._series(src_dir, aligned_dir, tile_grid, n=3, size=64)
+        pending = StackTilesStep().execute(series, output_dir, memory_budget_mb=0.05)
+        series[1].write_bytes(b"not a tiff")  # source corrupted between execute and flush
+        with pytest.raises(Exception):
+            pending.flush_all()
+        assert not (output_dir / "stack_31TCJ.nc").exists()

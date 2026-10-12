@@ -268,3 +268,78 @@ class TestNodataPropagation:
         with rio.open(out) as dst:
             arr = dst.read(1)
         assert (arr[:, :28] == 0).all() and (arr[2:-2, 38:-3] == 5.0).all()
+
+
+class TestMemoryBudget:
+    """Aligned rasters are produced window by window; content must not depend on the budget."""
+
+    TINY = 0.4  # MB: ~30 pixel rows per window
+
+    @staticmethod
+    def _read(path: Path):
+        with rio.open(path) as dst:
+            return dst.read(), dst.transform, dst.tags(), dst.descriptions, dst.nodata
+
+    def _same(self, a: Path, b: Path) -> None:
+        da, ta, tags_a, desc_a, nd_a = self._read(a)
+        db, tb, tags_b, desc_b, nd_b = self._read(b)
+        np.testing.assert_array_equal(da, db)
+        assert ta == tb and tags_a == tags_b and desc_a == desc_b and nd_a == nd_b
+
+    def test_warped_windows_equal_the_single_window_result(self, tmp_path, tile_grid):
+        src = make_raster(
+            tmp_path / "g_20250314.tif", 6.5, 45.5, res=0.0005, size=200, crs="EPSG:4326",
+            count=2, descriptions=("a", "b"),
+        )
+        for method in ("bilinear", "cubic"):
+            big = run([src], tmp_path / f"big_{method}", tile_grid, method=method).outputs[0]
+            small = run([src], tmp_path / f"small_{method}", tile_grid, method=method, memory_budget_mb=self.TINY).outputs[0]
+            self._same(big, small)
+
+    def test_lattice_windows_equal_the_single_window_result(self, scene, tmp_path, tile_grid):
+        big = run([scene], tmp_path / "big", tile_grid, full_tile=True, resolution=100.0).outputs[0]
+        small = run([scene], tmp_path / "small", tile_grid, full_tile=True, resolution=100.0, memory_budget_mb=self.TINY).outputs[0]
+        self._same(big, small)
+
+    def test_input_spanning_several_tiles_gives_the_same_outputs(self, tmp_path, tile_grid):
+        src = make_raster(tmp_path / "s_20250314_vv.tif", 409400.0, 4890000.0)
+        big = run([src], tmp_path / "big", tile_grid).outputs
+        small = run([src], tmp_path / "small", tile_grid, memory_budget_mb=self.TINY).outputs
+        assert len(big) == len(small) == 2
+        for a, b in zip(big, small):
+            assert a.name == b.name
+            self._same(a, b)
+
+    def test_skipped_tile_leaves_no_file_with_small_budget(self, tmp_path, output_dir, tile_grid):
+        empty = make_raster(tmp_path / "e_20250314_vv.tif", 310000.0, 4890000.0, fill=np.zeros((1, 64, 64), "float32"))
+        assert run([empty], output_dir, tile_grid, memory_budget_mb=self.TINY).outputs == []
+        assert not list(output_dir.glob("*"))
+
+    def test_sparse_window_is_skipped_by_min_valid_fraction_across_windows(self, tmp_path, output_dir, tile_grid):
+        sparse = np.zeros((1, 64, 64), "float32")
+        sparse[0, 0, :4] = 5.0
+        src = make_raster(tmp_path / "p_20250314_vv.tif", 310000.0, 4890000.0, fill=sparse)
+        assert run([src], output_dir, tile_grid, min_valid_fraction=0.5, memory_budget_mb=self.TINY).outputs == []
+        assert len(run([src], output_dir, tile_grid, memory_budget_mb=self.TINY).outputs) == 1
+
+    def test_full_tile_peak_allocation_is_bounded(self, scene, output_dir, tile_grid):
+        import tracemalloc
+
+        # full Tile at 100 m: 1098 x 1098 px x 2 bands x 4 B = 9.6 MB if held whole
+        two_band = make_raster(
+            scene.parent / "t_20250314_vv.tif", 310000.0, 4890000.0, count=2, size=1000, res=100.0,
+            fill=np.full((2, 1000, 1000), 3, "float32"),
+        )
+        tracemalloc.start()
+        try:
+            AlignToTileStep().execute(
+                [two_band], output_dir, grid_path=tile_grid, full_tile=True, resolution=100.0, memory_budget_mb=1,
+            ).flush_all()
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert peak < 5 * 2**20
+
+    def test_budget_too_small_for_one_row_raises(self, scene, output_dir, tile_grid):
+        with pytest.raises(ValueError, match=r"memory_budget_mb.*at least"):
+            AlignToTileStep().execute([scene], output_dir, grid_path=tile_grid, memory_budget_mb=1e-6)

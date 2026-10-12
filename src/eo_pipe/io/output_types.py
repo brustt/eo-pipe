@@ -26,10 +26,11 @@ Three built-in :class:`VectorFormat` strategies:
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TYPE_CHECKING, Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, Callable, ContextManager, TYPE_CHECKING, Optional, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 import geopandas as gpd
@@ -182,6 +183,50 @@ class RasterOutput:
 
 
 @dataclass
+class WindowedRasterOutput:
+    """Raster produced and written window by window — the full array is never in memory.
+
+    The file is written under a temporary name and renamed on success, so a failed
+    write leaves nothing at *path*.
+
+    Args:
+        windows: Windows covering the raster, written in order.
+        open_producer: Context-manager factory yielding a callable that maps a window
+            to its ``(bands, rows, cols)`` array; it owns the source handles.
+        path: Intended output path.
+        meta: Rasterio profile keyword arguments forwarded to the writer.
+        writer: Writer instance injected by the step from ``self._writer``.
+        tags: Dataset-level GeoTIFF tags written after the raster.
+        descriptions: Per-band descriptions written after the raster.
+    """
+
+    windows: Sequence[Any]
+    open_producer: Callable[[], ContextManager[Callable[[Any], np.ndarray]]]
+    path: Path
+    meta: dict[str, Any]
+    writer: "RasterWriter"
+    tags: Optional[dict[str, str]] = None
+    descriptions: Optional[Sequence[Optional[str]]] = None
+
+    def flush(self) -> Path:
+        """Stream the windows to *path* via *writer* and return the resolved path."""
+        tmp = self.path.with_name(self.path.name + ".part")
+        try:
+            with self.open_producer() as produce:
+                self.writer.write_windows(tmp, self.windows, produce, **self.meta)
+            if self.tags or self.descriptions:
+                with rio.open(tmp, "r+") as dst:
+                    if self.tags:
+                        dst.update_tags(**self.tags)
+                    if self.descriptions:
+                        dst.descriptions = tuple(self.descriptions)
+            os.replace(tmp, self.path)
+        finally:
+            tmp.unlink(missing_ok=True)
+        return self.path
+
+
+@dataclass
 class VectorOutput:
     """In-memory GeoDataFrame that writes via a :class:`VectorFormat` on flush.
 
@@ -238,18 +283,45 @@ class FlushedOutput:
 
 @dataclass
 class XarrayOutput:
-    """In-memory ``xarray.Dataset`` that writes a NetCDF file on flush.
+    """``xarray.Dataset`` that writes a NetCDF file on flush.
+
+    The Dataset may be in memory or dask-backed.  A dask-backed Dataset is computed
+    and streamed to disk chunk by chunk at flush time, with on-disk chunking matching
+    its dask chunks (so a full time axis per chunk stays one on-disk chunk).  The file
+    is written under a temporary name and renamed on success, so a failed write never
+    leaves a valid-looking file at *path*.
 
     Args:
         ds: The Dataset to persist.
         path: Intended output path (``.nc``).
+        num_workers: Chunks computed concurrently on the local threaded scheduler
+            (dask default when ``None``).
     """
 
     ds: "xr.Dataset"
     path: Path
+    num_workers: Optional[int] = None
+
+    def _with_chunk_encoding(self) -> "xr.Dataset":
+        ds = self.ds
+        for name, var in ds.data_vars.items():
+            if var.chunks is not None and "chunksizes" not in var.encoding:
+                ds[name].encoding["chunksizes"] = tuple(c[0] for c in var.chunks)
+        return ds
 
     def flush(self) -> Path:
         """Write *ds* to *path* as NetCDF4 and return the path."""
+        import dask
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.ds.to_netcdf(self.path, engine="netcdf4")
+        tmp = self.path.with_name(self.path.name + ".part")
+        try:
+            config: dict[str, Any] = {"scheduler": "threads"}
+            if self.num_workers:
+                config["num_workers"] = self.num_workers
+            with dask.config.set(config):
+                self._with_chunk_encoding().to_netcdf(tmp, engine="netcdf4")
+            os.replace(tmp, self.path)
+        finally:
+            tmp.unlink(missing_ok=True)
         return self.path

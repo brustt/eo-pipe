@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import dask.array as da
 import numpy as np
 import rasterio as rio
 import rioxarray  # noqa: F401  (registers the .rio accessor)
@@ -16,6 +17,7 @@ from rasterio.crs import CRS
 
 from eo_pipe.io.aligned import TAG_PARAMS, identify, iso_to_datetime64
 from eo_pipe.io.lattice import Lattice
+from eo_pipe.io.memory import budget_mb, plan_chunks
 from eo_pipe.io.output_types import XarrayOutput
 from eo_pipe.io.path_utils import NamedPathStrategy
 from eo_pipe.logging import setup_logger
@@ -100,6 +102,32 @@ def _nodata_mask(data: np.ndarray, nodata: Optional[float]) -> np.ndarray:
     return np.isnan(data) if math.isnan(nodata) else data == nodata
 
 
+def _assemble_block(
+    block: np.ndarray,
+    block_info: Any = None,
+    *,
+    entries: List[Tuple[_Member, int, int]],
+    lattice: Lattice,
+    nodata: float,
+) -> np.ndarray:
+    """Build one ``(time, rows, cols)`` chunk of a variable from the source windows it covers."""
+    (_, _), (r_lo, r_hi), (c_lo, c_hi) = block_info[0]["array-location"]
+    out = np.full(block.shape, nodata, dtype=block.dtype)
+    for m, band, t in entries:           # input order: first valid value wins when slices overlap
+        col0, row0 = lattice.offset(m.left, m.top)
+        c0, c1 = max(c_lo, col0), min(c_hi, col0 + m.width)
+        r0, r1 = max(r_lo, row0), min(r_hi, row0 + m.height)
+        if c0 >= c1 or r0 >= r1:
+            continue
+        window = rio.windows.Window(c0 - col0, r0 - row0, c1 - c0, r1 - r0)
+        with rio.open(m.path) as src:
+            data = src.read(band + 1, window=window)
+        target = out[t, r0 - r_lo : r1 - r_lo, c0 - c_lo : c1 - c_lo]
+        free = ~_nodata_mask(data, m.nodata) & _nodata_mask(target, nodata)
+        target[free] = data[free]
+    return out
+
+
 @StepRegistry.register
 class StackTilesStep(StepBase):
     """Stack the Aligned rasters of each Tile into one NetCDF Dataset per Tile.
@@ -121,6 +149,11 @@ class StackTilesStep(StepBase):
             step (earliest datetime), e.g. consecutive slices of one pass; where
             they overlap the first valid value wins. Only combine rasters you
             already grouped (same relative orbit and orbit state).
+        memory_budget_mb (float): Ceiling for the whole step, in MB. The Tile stack is
+            never fully loaded: it is built lazily in spatial chunks (full time axis per
+            chunk) and streamed to the NetCDF file, one Tile after another. Chunk size
+            and concurrency are derived from it; very long series get smaller chunks.
+            Raises if not even a minimal chunk fits. Default ``4096``.
     """
 
     name = "stack_tiles"
@@ -130,6 +163,7 @@ class StackTilesStep(StepBase):
         time_bin = params.get("time_bin")
         if time_bin not in (None, "day"):
             raise ValueError(f"time_bin must be None or 'day', got {time_bin!r}.")
+        budget = budget_mb(params)
         groups: Dict[str, List[_Member]] = {}
         for path in inputs:
             member = _describe(Path(path))
@@ -139,9 +173,9 @@ class StackTilesStep(StepBase):
         for tile in sorted(groups):
             members = groups[tile]
             _validate(tile, members)
-            ds = self._build(tile, members, union, params.get("nodata"), time_bin)
+            ds, workers = self._build(tile, members, union, params.get("nodata"), time_bin, budget)
             path = NamedPathStrategy(".nc").resolve(f"stack_{tile}", Path(), 0, output_dir)
-            outputs.append(XarrayOutput(ds=ds, path=path))
+            outputs.append(XarrayOutput(ds=ds, path=path, num_workers=workers))
         return StepOutput(outputs=outputs)
 
     def _build(
@@ -151,7 +185,8 @@ class StackTilesStep(StepBase):
         union: bool,
         nodata_param: Optional[float],
         time_bin: Optional[str],
-    ) -> xr.Dataset:
+        budget: float,
+    ) -> Tuple[xr.Dataset, int]:
         ref = members[0]
         res = ref.res
         pick = (min, max) if union else (max, min)
@@ -169,13 +204,9 @@ class StackTilesStep(StepBase):
         bins = sorted({bin_of(m.iso) for m in members})
         time_index = {b: i for i, b in enumerate(bins)}
         isos = [min(m.iso for m in members if bin_of(m.iso) == b) for b in bins]
-        arrays: Dict[str, np.ndarray] = {}
+        entries: Dict[str, List[Tuple[_Member, int, int]]] = {}   # var -> (member, band, time step)
         seen: set = set()
-
         for m in members:
-            with rio.open(m.path) as src:
-                data = src.read()
-            valid = ~_nodata_mask(data, m.nodata)
             for band, var in enumerate(m.variables):
                 key = (m.iso, var)
                 if key in seen:
@@ -183,18 +214,20 @@ class StackTilesStep(StepBase):
                         f"Tile {tile}: duplicate variable '{var}' at {m.iso} ({m.path.name})."
                     )
                 seen.add(key)
-                if var not in arrays:
-                    arrays[var] = np.full((len(isos), height, width), nodata, dtype=ref.dtype)
-                col0, row0 = lattice.offset(m.left, m.top)
-                c0, c1 = max(0, col0), min(width, col0 + m.width)
-                r0, r1 = max(0, row0), min(height, row0 + m.height)
-                if c0 >= c1 or r0 >= r1:
-                    continue
-                block = data[band, r0 - row0 : r1 - row0, c0 - col0 : c1 - col0]
-                ok = valid[band, r0 - row0 : r1 - row0, c0 - col0 : c1 - col0]
-                target = arrays[var][time_index[bin_of(m.iso)], r0:r1, c0:c1]
-                free = ok & _nodata_mask(target, nodata)   # first valid value wins when slices overlap
-                target[free] = block[free]
+                entries.setdefault(var, []).append((m, band, time_index[bin_of(m.iso)]))
+
+        dtype = np.dtype(ref.dtype)
+        plan = plan_chunks(budget, len(entries) * len(isos) * dtype.itemsize, height, width)
+        logger.info(
+            "Tile %s: %d dates x %d variables, %dx%d px, chunks of %d px, %d at a time",
+            tile, len(isos), len(entries), width, height, plan.side, plan.workers,
+        )
+        arrays: Dict[str, da.Array] = {}
+        for var, var_entries in entries.items():
+            base = da.zeros((len(isos), height, width), chunks=(len(isos), plan.side, plan.side), dtype=dtype)
+            arrays[var] = base.map_blocks(
+                _assemble_block, dtype=dtype, entries=var_entries, lattice=lattice, nodata=nodata
+            )
 
         ds = xr.Dataset(
             {var: (("time", "y", "x"), arr) for var, arr in arrays.items()},
@@ -220,4 +253,4 @@ class StackTilesStep(StepBase):
             source_tags=json.dumps({m.path.stem: m.tags for m in members}),
             align_params=json.dumps(sorted({m.tags[TAG_PARAMS] for m in members if TAG_PARAMS in m.tags})),
         )
-        return ds
+        return ds, plan.workers

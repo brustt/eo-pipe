@@ -121,18 +121,7 @@ class RasterWriter:
             Resolved output path.
         """
         output_file = Path(output_file)
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-
-        creation = self._creation_options(data.dtype)
-        profile.update(creation)
-        profile["driver"] = "GTiff"
-
-        if self.nodata is not None:
-            profile["nodata"] = self.nodata
-
-        if gcps:
-            profile.pop("crs", None)
-            profile.pop("transform", None)
+        profile = self._profile(output_file, data.dtype, profile, drop_transform=bool(gcps))
 
         with rio.open(output_file, "w", **profile) as dst:
             dst.write(data)
@@ -142,6 +131,42 @@ class RasterWriter:
         if self.cog:
             self._to_cog(output_file, profile.get("nodata", 0))
 
+        return output_file
+
+    def _profile(self, output_file: Path, dtype: Any, profile: Dict[str, Any], drop_transform: bool = False) -> Dict[str, Any]:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        profile = dict(profile)
+        profile.update(self._creation_options(np.dtype(dtype)))
+        profile["driver"] = "GTiff"
+        if self.nodata is not None:
+            profile["nodata"] = self.nodata
+        if drop_transform:
+            profile.pop("crs", None)
+            profile.pop("transform", None)
+        return profile
+
+    def write_windows(
+        self,
+        output_file: Union[str, Path],
+        windows: Any,
+        produce: Any,
+        **profile: Any,
+    ) -> Path:
+        """Stream a GeoTIFF window by window, never holding the whole array.
+
+        Args:
+            output_file: Destination path.
+            windows: Iterable of :class:`rasterio.windows.Window` covering the raster.
+            produce: Callable mapping a window to its ``(bands, rows, cols)`` array.
+            **profile: Rasterio profile keyword arguments (must include ``dtype``).
+        """
+        output_file = Path(output_file)
+        profile = self._profile(output_file, profile["dtype"], profile)
+        with rio.open(output_file, "w", **profile) as dst:
+            for window in windows:
+                dst.write(produce(window), window=window)
+        if self.cog:
+            self._to_cog(output_file, profile.get("nodata", 0))
         return output_file
 
     def _to_cog(self, path: Path, nodata: Any) -> None:
