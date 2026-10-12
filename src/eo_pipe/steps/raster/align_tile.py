@@ -76,7 +76,8 @@ def _warp_options(
 
     GDAL derives the resampling scale and the source margin per chunk from the part of the
     source a window touches, so the same pixel would resample differently depending on how
-    the output is cut.  Both are pinned from the window's footprint instead: ``XSCALE`` /
+    the output is cut.  Both are pinned from the footprint of the *whole* output instead
+    (never a window's, whose ratio drifts with latitude): ``XSCALE`` /
     ``YSCALE`` are destination over source pixel size (below 1 when downsampling) and
     ``SOURCE_EXTRA`` is the kernel margin in source pixels.
     """
@@ -208,6 +209,8 @@ class AlignToTileStep(StepBase):
             inp.name, tile.name, width, height, len(windows), rows,
         )
 
+        warp_opts = {} if fast else _warp_options(src, transform, width, height, tile.crs, res)
+
         def window_fn(src: rio.DatasetReader) -> Callable[[Window], np.ndarray]:
             def produce(window: Window) -> np.ndarray:
                 r0, h = int(window.row_off), int(window.height)
@@ -222,7 +225,7 @@ class AlignToTileStep(StepBase):
                     dst_transform=dst_transform, dst_crs=tile.crs, dst_nodata=nodata,
                     resampling=_RESAMPLE_METHODS[method], init_dest_nodata=True,
                     tolerance=0.0,   # exact transform and kernel margin: output must not depend on window geometry
-                    **_warp_options(src, dst_transform, width, h, tile.crs, res),
+                    **warp_opts,
                 )
                 return dest
             return produce

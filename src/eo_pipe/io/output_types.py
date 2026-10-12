@@ -28,9 +28,10 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, ContextManager, TYPE_CHECKING, Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, Callable, ContextManager, Iterator, TYPE_CHECKING, Optional, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 import geopandas as gpd
@@ -40,6 +41,20 @@ if TYPE_CHECKING:
     import xarray as xr
 
     from eo_pipe.io.raster_io import RasterWriter
+
+
+@contextmanager
+def atomic_path(path: Path) -> Iterator[Path]:
+    """Yield a temporary ``<path>.part`` to write to; rename it onto *path* on success.
+
+    A failed write never leaves *path* or the temporary file behind.
+    """
+    tmp = path.with_name(path.name + ".part")
+    try:
+        yield tmp
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -210,8 +225,7 @@ class WindowedRasterOutput:
 
     def flush(self) -> Path:
         """Stream the windows to *path* via *writer* and return the resolved path."""
-        tmp = self.path.with_name(self.path.name + ".part")
-        try:
+        with atomic_path(self.path) as tmp:
             with self.open_producer() as produce:
                 self.writer.write_windows(tmp, self.windows, produce, **self.meta)
             if self.tags or self.descriptions:
@@ -220,9 +234,6 @@ class WindowedRasterOutput:
                         dst.update_tags(**self.tags)
                     if self.descriptions:
                         dst.descriptions = tuple(self.descriptions)
-            os.replace(tmp, self.path)
-        finally:
-            tmp.unlink(missing_ok=True)
         return self.path
 
 
@@ -314,14 +325,9 @@ class XarrayOutput:
         import dask
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(self.path.name + ".part")
-        try:
-            config: dict[str, Any] = {"scheduler": "threads"}
-            if self.num_workers:
-                config["num_workers"] = self.num_workers
-            with dask.config.set(config):
-                self._with_chunk_encoding().to_netcdf(tmp, engine="netcdf4")
-            os.replace(tmp, self.path)
-        finally:
-            tmp.unlink(missing_ok=True)
+        config: dict[str, Any] = {"scheduler": "threads"}
+        if self.num_workers:
+            config["num_workers"] = self.num_workers
+        with atomic_path(self.path) as tmp, dask.config.set(config):
+            self._with_chunk_encoding().to_netcdf(tmp, engine="netcdf4")
         return self.path

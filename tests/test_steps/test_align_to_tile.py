@@ -343,3 +343,48 @@ class TestMemoryBudget:
     def test_budget_too_small_for_one_row_raises(self, scene, output_dir, tile_grid):
         with pytest.raises(ValueError, match=r"memory_budget_mb.*at least"):
             AlignToTileStep().execute([scene], output_dir, grid_path=tile_grid, memory_budget_mb=1e-6)
+
+
+class TestWarpFidelity:
+    """A windowed warp must equal the single-window warp, for every method and for downsampling."""
+
+    SMALL = 0.15  # MB: windows of a few dozen rows
+
+    CASES = {
+        "geographic_downsampling": dict(x0=6.5, y0=45.5, res=0.00005, size=700, crs="EPSG:4326"),
+        "geographic_upsampling": dict(x0=6.5, y0=45.5, res=0.0005, size=200, crs="EPSG:4326"),
+        "projected_downsampling": dict(x0=310000.0, y0=4890000.0, res=3.0, size=900, crs="EPSG:32631"),
+    }
+
+    @pytest.mark.parametrize("method", ["nearest", "bilinear", "average", "cubic", "lanczos"])
+    @pytest.mark.parametrize("case", CASES)
+    def test_windowed_warp_equals_single_window_warp(self, tmp_path, tile_grid, case, method):
+        spec = dict(self.CASES[case])
+        src = make_raster(tmp_path / "g_20250314.tif", spec.pop("x0"), spec.pop("y0"), **spec)
+        big = run([src], tmp_path / "big", tile_grid, method=method).outputs
+        small = run([src], tmp_path / "small", tile_grid, method=method, memory_budget_mb=self.SMALL).outputs
+        assert len(big) == len(small) >= 1
+        for a, b in zip(big, small):
+            with rio.open(a) as x, rio.open(b) as y:
+                assert x.height > 100                       # several windows at this budget
+                np.testing.assert_array_equal(x.read(), y.read())
+
+
+class TestFailedWrite:
+    def test_failed_write_leaves_neither_the_file_nor_a_part_file(self, tmp_path, output_dir, tile_grid, monkeypatch):
+        from eo_pipe.steps.raster import align_tile
+
+        src = make_raster(tmp_path / "g_20250314.tif", 6.5, 45.5, res=0.0005, size=200, crs="EPSG:4326")
+        pending = AlignToTileStep().execute([src], output_dir, grid_path=tile_grid, memory_budget_mb=0.15)
+        real, calls = align_tile.reproject, []
+
+        def fail_on_third_window(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 3:
+                raise RuntimeError("disk on fire")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(align_tile, "reproject", fail_on_third_window)
+        with pytest.raises(RuntimeError, match="disk on fire"):
+            pending.flush_all()
+        assert not list(output_dir.glob("*"))

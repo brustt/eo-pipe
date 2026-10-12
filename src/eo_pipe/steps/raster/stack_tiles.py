@@ -106,14 +106,18 @@ def _assemble_block(
     block: np.ndarray,
     block_info: Any = None,
     *,
-    entries: List[Tuple[_Member, int, int]],
+    entries: List[Tuple[_Member, List[Tuple[int, int, int]]]],
     lattice: Lattice,
     nodata: float,
 ) -> np.ndarray:
-    """Build one ``(time, rows, cols)`` chunk of a variable from the source windows it covers."""
-    (_, _), (r_lo, r_hi), (c_lo, c_hi) = block_info[0]["array-location"]
+    """Build one ``(variable, time, rows, cols)`` chunk from the source windows it covers.
+
+    *entries* lists, in input order, each source with its ``(band, variable, time step)``
+    contributions; a source is opened once and all its needed bands read together.
+    """
+    (_, _), (_, _), (r_lo, r_hi), (c_lo, c_hi) = block_info[0]["array-location"]
     out = np.full(block.shape, nodata, dtype=block.dtype)
-    for m, band, t in entries:           # input order: first valid value wins when slices overlap
+    for m, contributions in entries:     # input order: first valid value wins when slices overlap
         col0, row0 = lattice.offset(m.left, m.top)
         c0, c1 = max(c_lo, col0), min(c_hi, col0 + m.width)
         r0, r1 = max(r_lo, row0), min(r_hi, row0 + m.height)
@@ -121,10 +125,11 @@ def _assemble_block(
             continue
         window = rio.windows.Window(c0 - col0, r0 - row0, c1 - c0, r1 - r0)
         with rio.open(m.path) as src:
-            data = src.read(band + 1, window=window)
-        target = out[t, r0 - r_lo : r1 - r_lo, c0 - c_lo : c1 - c_lo]
-        free = ~_nodata_mask(data, m.nodata) & _nodata_mask(target, nodata)
-        target[free] = data[free]
+            data = src.read([band + 1 for band, _, _ in contributions], window=window)
+        for plane, (_, v, t) in zip(data, contributions):
+            target = out[v, t, r0 - r_lo : r1 - r_lo, c0 - c_lo : c1 - c_lo]
+            free = ~_nodata_mask(plane, m.nodata) & _nodata_mask(target, nodata)
+            target[free] = plane[free]
     return out
 
 
@@ -204,9 +209,11 @@ class StackTilesStep(StepBase):
         bins = sorted({bin_of(m.iso) for m in members})
         time_index = {b: i for i, b in enumerate(bins)}
         isos = [min(m.iso for m in members if bin_of(m.iso) == b) for b in bins]
-        entries: Dict[str, List[Tuple[_Member, int, int]]] = {}   # var -> (member, band, time step)
+        var_index: Dict[str, int] = {}
+        entries: List[Tuple[_Member, List[Tuple[int, int, int]]]] = []   # member -> (band, variable, time step)
         seen: set = set()
         for m in members:
+            contributions = []
             for band, var in enumerate(m.variables):
                 key = (m.iso, var)
                 if key in seen:
@@ -214,20 +221,23 @@ class StackTilesStep(StepBase):
                         f"Tile {tile}: duplicate variable '{var}' at {m.iso} ({m.path.name})."
                     )
                 seen.add(key)
-                entries.setdefault(var, []).append((m, band, time_index[bin_of(m.iso)]))
+                contributions.append((band, var_index.setdefault(var, len(var_index)), time_index[bin_of(m.iso)]))
+            entries.append((m, contributions))
 
         dtype = np.dtype(ref.dtype)
-        plan = plan_chunks(budget, len(entries) * len(isos) * dtype.itemsize, height, width)
+        plan = plan_chunks(budget, len(var_index) * len(isos) * dtype.itemsize, height, width)
         logger.info(
             "Tile %s: %d dates x %d variables, %dx%d px, chunks of %d px, %d at a time",
-            tile, len(isos), len(entries), width, height, plan.side, plan.workers,
+            tile, len(isos), len(var_index), width, height, plan.side, plan.workers,
         )
-        arrays: Dict[str, da.Array] = {}
-        for var, var_entries in entries.items():
-            base = da.zeros((len(isos), height, width), chunks=(len(isos), plan.side, plan.side), dtype=dtype)
-            arrays[var] = base.map_blocks(
-                _assemble_block, dtype=dtype, entries=var_entries, lattice=lattice, nodata=nodata
-            )
+        # One chunk holds every variable, so each source is opened once per chunk; the
+        # per-variable arrays slice the shared chunk and are computed together at write time.
+        base = da.zeros(
+            (len(var_index), len(isos), height, width),
+            chunks=(len(var_index), len(isos), plan.side, plan.side), dtype=dtype,
+        )
+        combined = base.map_blocks(_assemble_block, dtype=dtype, entries=entries, lattice=lattice, nodata=nodata)
+        arrays: Dict[str, da.Array] = {var: combined[i] for var, i in var_index.items()}
 
         ds = xr.Dataset(
             {var: (("time", "y", "x"), arr) for var, arr in arrays.items()},

@@ -353,3 +353,36 @@ class TestOutOfCore:
         with pytest.raises(Exception):
             pending.flush_all()
         assert not (output_dir / "stack_31TCJ.nc").exists()
+
+
+class TestMultiPolarizationSource:
+    """A source carrying VV and VH together stacks the same whatever the budget."""
+
+    def test_tiny_budget_equals_large_budget_and_keeps_each_band(self, src_dir, aligned_dir, tile_grid, tmp_path):
+        rng = np.random.default_rng(5)
+        srcs = []
+        for day, x0, vv, vh in ((12, 310000.0, 3.0, 30.0), (14, 310200.0, 7.0, 70.0), (16, 310100.0, 5.0, 50.0)):
+            data = np.stack([np.full((64, 64), vv), np.full((64, 64), vh)]).astype("float32")
+            data += rng.uniform(0, 0.5, data.shape).astype("float32")
+            srcs.append(make_raster(
+                src_dir / f"s_202503{day}T051233.tif", x0, 4890000.0, count=2,
+                descriptions=("VV", "VH"), fill=data,
+            ))
+        series = align(srcs, aligned_dir, tile_grid)
+        big = stack(series, tmp_path / "big", union=True)[0]
+        small = stack(series, tmp_path / "small", union=True, memory_budget_mb=0.05)[0]
+        _assert_same_stack(big, small)
+        with xr.open_dataset(small) as ds:
+            assert set(ds.data_vars) == {"VV", "VH"}
+            assert float(ds.VH.isel(time=1).max()) > 69.0 > float(ds.VV.isel(time=1).max()) 
+
+
+class TestFailedWrite:
+    def test_failed_write_leaves_neither_the_file_nor_a_part_file(self, src_dir, aligned_dir, output_dir, tile_grid):
+        srcs = [make_raster(src_dir / f"s_2025031{d}T051233_vv.tif", 310000.0, 4890000.0) for d in (2, 4)]
+        series = align(srcs, aligned_dir, tile_grid)
+        pending = StackTilesStep().execute(series, output_dir, memory_budget_mb=0.05)
+        series[1].unlink()                              # a source vanishes before the write
+        with pytest.raises(Exception):
+            pending.flush_all()
+        assert not list(output_dir.glob("*"))
