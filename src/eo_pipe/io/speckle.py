@@ -16,13 +16,13 @@ import dask.array as da
 import numpy as np
 from scipy.ndimage import uniform_filter
 
-from eo_pipe.io.memory import MIN_CHUNK_SIDE, ChunkPlan, plan_chunks
+from eo_pipe.io.memory import ChunkPlan, plan_chunks
 
 #: Equivalent number of looks of Sentinel-1 IW GRDH.
 DEFAULT_ENL = 4.4
 DEFAULT_WINDOW = 7
-#: Bytes per pixel and date of a chunk's float64 working copies (input, mask, sums, output).
-_WORK_BYTES = 16
+#: Bytes per pixel and date of a chunk's float64 working copies (~10 temporaries of the kernel, at OVERHEAD x on top).
+_WORK_BYTES = 32
 
 
 def check_window(window_size: int) -> int:
@@ -91,10 +91,9 @@ def quegan_block(block: np.ndarray, *, window: int, nodata: Optional[float]) -> 
 
 def plan_filter_chunks(budget: float, dates: int, height: int, width: int, window: int) -> ChunkPlan:
     """Chunk side (halo excluded) and concurrency for a filter over *dates* per pixel."""
-    plan = plan_chunks(budget, dates * _WORK_BYTES, height, width)
     halo = window // 2
-    side = max(plan.side - 2 * halo, MIN_CHUNK_SIDE, halo)
-    return ChunkPlan(side=side, workers=plan.workers)
+    plan = plan_chunks(budget, dates * _WORK_BYTES, height, width, halo=halo)
+    return ChunkPlan(side=max(plan.side, halo), workers=plan.workers)
 
 
 def filter_lazily(array: da.Array, kernel: Callable[..., np.ndarray], halo: int, **kwargs: Any) -> da.Array:

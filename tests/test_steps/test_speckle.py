@@ -112,7 +112,7 @@ class TestLee:
         # a tiny budget forces the minimum 16 px chunks
         small_dir = output_dir / "small"
         small_dir.mkdir()
-        small = run(LeeFilterStep(), inp, small_dir, window_size=7, memory_budget_mb=0.05)
+        small = run(LeeFilterStep(), inp, small_dir, window_size=7, memory_budget_mb=0.2)
         with rio.open(output_dir / "big.tif") as a, rio.open(small) as b:
             np.testing.assert_allclose(a.read(), b.read(), rtol=1e-6)
 
@@ -155,7 +155,7 @@ class TestLee:
 
     def test_netcdf_on_disk_chunks_match_processing_chunks(self, tmp_path, output_dir):
         inp = write_stack(tmp_path / "s.nc", {"VV": speckled((4, H, W))})
-        out = run(LeeFilterStep(), inp, output_dir, window_size=3, memory_budget_mb=0.05)
+        out = run(LeeFilterStep(), inp, output_dir, window_size=3, memory_budget_mb=0.2)
         ds = xr.open_dataset(out)
         t, ch_y, ch_x = ds.VV.encoding["chunksizes"]
         assert t == 4 and ch_y < H and ch_x < W
@@ -212,7 +212,7 @@ class TestQuegan:
         cube[0, :, :20] = np.nan       # first date missing on the left half
         cube[2, 10:15, 10:15] = np.nan
         inp = write_stack(tmp_path / "s.nc", {"VV": cube})
-        out = run(QueganFilterStep(), inp, output_dir, window_size=5, memory_budget_mb=0.05)
+        out = run(QueganFilterStep(), inp, output_dir, window_size=5, memory_budget_mb=0.2)
         got = xr.open_dataset(out).VV.values
         valid = ~np.isnan(cube)
         expected = reference_quegan(np.where(valid, cube, 0).astype("float64"), valid, 5)
@@ -255,8 +255,8 @@ def test_chain_via_composition(tmp_path):
 
 class TestPlanFilterChunks:
     def test_shrinks_with_budget(self):
-        big = plan_filter_chunks(4096, 100, 10980, 10980, 7)
-        small = plan_filter_chunks(256, 100, 10980, 10980, 7)
+        big = plan_filter_chunks(16384, 100, 10980, 10980, 7)
+        small = plan_filter_chunks(64, 100, 10980, 10980, 7)
         assert small.side < big.side
 
     def test_reduces_workers_before_chunk(self):
@@ -268,8 +268,20 @@ class TestPlanFilterChunks:
         with pytest.raises(ValueError, match="at least"):
             plan_filter_chunks(0.01, 100, 10980, 10980, 7)
 
-    def test_side_at_least_halo(self):
-        assert plan_filter_chunks(4096, 2, 100, 100, 41).side >= 20
+    def test_padded_chunk_stays_within_budget(self):
+        from eo_pipe.io.memory import OVERHEAD
+        from eo_pipe.io.speckle import _WORK_BYTES
+
+        for window in (3, 7, 41):
+            halo = window // 2
+            plan = plan_filter_chunks(256, 100, 10980, 10980, window)
+            padded = (plan.side + 2 * halo) ** 2
+            assert plan.workers * padded * 100 * _WORK_BYTES * OVERHEAD <= 256 * 2**20
+
+    def test_halo_larger_than_budget_errors(self):
+        # a 16 px chunk plus a 201 px halo cannot fit 1 MB at 100 dates
+        with pytest.raises(ValueError, match="at least"):
+            plan_filter_chunks(1, 100, 10980, 10980, 401)
 
 
 def test_budget_validated():

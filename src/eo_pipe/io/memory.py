@@ -47,13 +47,22 @@ def _min_budget_error(budget: float, needed_bytes: float) -> ValueError:
 
 
 def plan_chunks(
-    budget: float, bytes_per_pixel: float, height: int, width: int, max_workers: Optional[int] = None
+    budget: float,
+    bytes_per_pixel: float,
+    height: int,
+    width: int,
+    max_workers: Optional[int] = None,
+    halo: int = 0,
 ) -> ChunkPlan:
     """Largest square chunk (and concurrency) whose estimated peak fits *budget* MB.
 
     *bytes_per_pixel* is the payload of one pixel across everything a chunk holds
     (time axis x variables x itemsize).  Concurrency is reduced before the chunk is
     shrunk below a sensible size.
+
+    With a *halo*, each chunk is processed with ``halo`` extra pixels on every side, so
+    the returned ``side`` is the chunk *without* them and the budget is checked against
+    the padded ``(side + 2 * halo)`` square.
 
     Raises:
         ValueError: If not even a minimal chunk fits, stating the minimum budget.
@@ -63,13 +72,14 @@ def plan_chunks(
 
         max_workers = CPU_COUNT
     per_pixel = bytes_per_pixel * OVERHEAD
-    minimal = per_pixel * MIN_CHUNK_SIDE**2
+    pad = 2 * halo
+    minimal = per_pixel * (MIN_CHUNK_SIDE + pad) ** 2
     if budget * _MB < minimal:
         raise _min_budget_error(budget, minimal)
     cap = max(height, width, 1)
     side, workers = MIN_CHUNK_SIDE, 1
     for w in range(max(1, max_workers), 0, -1):
-        side = int(math.sqrt(budget * _MB / (w * per_pixel)))
+        side = int(math.sqrt(budget * _MB / (w * per_pixel))) - pad
         workers = w
         if side >= min(_PREFERRED_SIDE, cap):
             break
