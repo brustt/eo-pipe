@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 
 if TYPE_CHECKING:
     from affine import Affine
+    from rasterio.windows import Window
     from eo_pipe.io.tiles import Tile
 
 Bounds = Tuple[float, float, float, float]
@@ -93,3 +94,32 @@ class Lattice:
         Offsets taken from the result index straight into an array covering *bounds*.
         """
         return Lattice(bounds[0], bounds[3], self.res_x, self.res_y)
+
+    def at_window(self, window: "Window") -> "Lattice":
+        """Same lattice with its origin moved to the upper-left pixel of *window*.
+
+        *window* is in pixels of this lattice; offsets taken from the result index into
+        an array covering just that window.
+        """
+        return Lattice(
+            self.origin_x + window.col_off * self.res_x,
+            self.origin_y - window.row_off * (self.res_y or self.res_x),
+            self.res_x,
+            self.res_y,
+        )
+
+    @property
+    def transform(self) -> "Affine":
+        """North-up affine transform whose upper-left corner is the origin."""
+        from affine import Affine
+
+        return Affine(self.res_x, 0.0, self.origin_x, 0.0, -(self.res_y or self.res_x), self.origin_y)
+
+    def bounds(self, width: int, height: int) -> Bounds:
+        """Bounds of a *width* x *height* pixel block starting at the origin."""
+        return (
+            self.origin_x,
+            self.origin_y - height * (self.res_y or self.res_x),
+            self.origin_x + width * self.res_x,
+            self.origin_y,
+        )
