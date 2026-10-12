@@ -238,6 +238,69 @@ class WindowedRasterOutput:
 
 
 @dataclass
+class DaskRasterOutput:
+    """Dask-backed raster written to GeoTIFF window by window — never fully in memory.
+
+    Windows follow the array's dask chunks; ``num_workers`` of them are computed at once
+    on the local threaded scheduler.  Written under a temporary name and renamed on
+    success, like :class:`WindowedRasterOutput`.
+
+    Args:
+        data: Dask array shaped ``(bands, height, width)``.
+        path: Intended output path.
+        meta: Rasterio profile keyword arguments forwarded to the writer.
+        writer: Writer instance injected by the step from ``self._writer``.
+        num_workers: Chunks computed concurrently (dask default when ``None``).
+        tags: Dataset-level GeoTIFF tags written after the raster.
+        descriptions: Per-band descriptions written after the raster.
+    """
+
+    data: Any
+    path: Path
+    meta: dict[str, Any]
+    writer: "RasterWriter"
+    num_workers: Optional[int] = None
+    tags: Optional[dict[str, str]] = None
+    descriptions: Optional[Sequence[Optional[str]]] = None
+
+    def flush(self) -> Path:
+        """Stream the chunks to *path* via *writer* and return the resolved path."""
+        import dask
+        from rasterio.windows import Window
+
+        rows = np.cumsum((0, *self.data.chunks[1]))
+        cols = np.cumsum((0, *self.data.chunks[2]))
+        windows = [
+            Window(int(c0), int(r0), int(c1 - c0), int(r1 - r0))
+            for r0, r1 in zip(rows[:-1], rows[1:])
+            for c0, c1 in zip(cols[:-1], cols[1:])
+        ]
+        batch = max(1, self.num_workers or 1)
+        ready: dict[Any, np.ndarray] = {}
+        todo = list(windows)
+
+        def slices(w: Any) -> Any:
+            return self.data[:, w.row_off : w.row_off + w.height, w.col_off : w.col_off + w.width]
+
+        def produce(window: Any) -> np.ndarray:
+            if window not in ready:
+                group, todo[:] = todo[:batch], todo[batch:]
+                with dask.config.set(scheduler="threads", num_workers=batch):
+                    ready.update(zip(group, dask.compute(*[slices(w) for w in group])))
+            return ready.pop(window)
+
+        with atomic_path(self.path) as tmp:
+            self.writer.write_windows(tmp, windows, produce, **self.meta)
+            if self.tags or self.descriptions:
+                with rio.open(tmp, "r+") as dst:
+                    if self.tags:
+                        dst.update_tags(**self.tags)
+                    if self.descriptions:
+                        dst.descriptions = tuple(self.descriptions)
+        return self.path
+
+
+@dataclass
 class VectorOutput:
     """In-memory GeoDataFrame that writes via a :class:`VectorFormat` on flush.
 
@@ -307,17 +370,22 @@ class XarrayOutput:
         path: Intended output path (``.nc``).
         num_workers: Chunks computed concurrently on the local threaded scheduler
             (dask default when ``None``).
+        encoding: Extra NetCDF encoding merged into every data variable's encoding
+            (e.g. ``{"zlib": True, "complevel": 1, "shuffle": True}``).  ``None`` adds nothing.
     """
 
     ds: "xr.Dataset"
     path: Path
     num_workers: Optional[int] = None
+    encoding: Optional[dict[str, Any]] = None
 
     def _with_chunk_encoding(self) -> "xr.Dataset":
         ds = self.ds
         for name, var in ds.data_vars.items():
             if var.chunks is not None and "chunksizes" not in var.encoding:
                 ds[name].encoding["chunksizes"] = tuple(c[0] for c in var.chunks)
+            if self.encoding:
+                ds[name].encoding.update(self.encoding)
         return ds
 
     def flush(self) -> Path:

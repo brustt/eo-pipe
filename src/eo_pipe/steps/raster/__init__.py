@@ -8,6 +8,7 @@ from .resample import ResampleStep
 from .s1_extract import S1ExtractStep
 from .s1_geocode import S1GeocodeStep
 from .sieve import SieveStep
+from .speckle import LeeFilterStep, QueganFilterStep
 from .stack_tiles import StackTilesStep
 
 __all__ = [
@@ -22,4 +23,6 @@ __all__ = [
     "S1ExtractStep",
     "S1GeocodeStep",
     "StackTilesStep",
+    "LeeFilterStep",
+    "QueganFilterStep",
 ]
