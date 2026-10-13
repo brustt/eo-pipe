@@ -155,3 +155,5 @@ logger is recreated at each step ?
 - use s1 global footprint orbit instead of S2 mgrs for orthofit ?
   - => easier to catch whole scene
   - s2 needed to align S2 data in the future
+- extent to OTB orthorectification modes 
+- metadata overwriting trhough pipeline composition inputs => review M2. Check how PipelineContext can handle this.

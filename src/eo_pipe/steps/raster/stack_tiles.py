@@ -104,22 +104,22 @@ def _validate(tile: str, members: List[_Member]) -> None:
     ref = members[0]
     for m in members[1:]:
         if m.crs != ref.crs:
-            raise ValueError(f"Tile {tile}: mixed CRS ({ref.path.name} vs {m.path.name}).")
+            raise ValueError(f"Stack {tile}: mixed CRS ({ref.path.name} vs {m.path.name}).")
         if not _same_nodata(m.nodata, ref.nodata):
             raise ValueError(
-                f"Tile {tile}: mixed nodata ({ref.nodata} in {ref.path.name}, {m.nodata} in {m.path.name})."
+                f"Stack {tile}: mixed nodata ({ref.nodata} in {ref.path.name}, {m.nodata} in {m.path.name})."
             )
         if m.dtype != ref.dtype:
             raise ValueError(
-                f"Tile {tile}: mixed dtype ({ref.dtype} in {ref.path.name}, {m.dtype} in {m.path.name})."
+                f"Stack {tile}: mixed dtype ({ref.dtype} in {ref.path.name}, {m.dtype} in {m.path.name})."
             )
         if abs(m.res - ref.res) > 1e-9:
             raise ValueError(
-                f"Tile {tile}: mixed resolution ({ref.res} in {ref.path.name}, {m.res} in {m.path.name})."
+                f"Stack {tile}: mixed resolution ({ref.res} in {ref.path.name}, {m.res} in {m.path.name})."
             )
         if not Lattice(ref.left, ref.top, ref.res).holds(m.left, m.top):
             raise ValueError(
-                f"Tile {tile}: {m.path.name} is not on the same lattice as {ref.path.name}."
+                f"Stack {tile}: {m.path.name} is not on the same lattice as {ref.path.name}."
             )
 
 
@@ -187,10 +187,12 @@ class StackTilesStep(StepBase):
             ``stack_<group>.nc``; the datetime is read from the filename (``date_pattern``)
             and the variable from the polarization (``_vv`` / ``_vh`` token) or band
             description.  They must already share one lattice (CRS, resolution, whole-pixel
-            offsets), as repeat-pass scenes of one orbit do.  Default ``None``: Aligned
+            offsets), as repeat-pass scenes of one orbit do; otherwise the step raises.  Default ``None``: Aligned
             rasters, grouped by Tile.
         date_pattern (str): With ``group``, regex extracting the acquisition date from the
-            filename stem. Default: first ``YYYYMMDD[THHMMSS]``.
+            filename stem. Default: the *first* ``YYYYMMDD[THHMMSS]`` in the stem, so a
+            Sentinel-1 ``<start>_<end>`` name is dated by its start.  Groups of a custom
+            pattern are concatenated and must give ``YYYYMMDD[THHMMSS]``.
         memory_budget_mb (float): Ceiling for the whole step, in MB. The Tile stack is
             never fully loaded: it is built lazily in spatial chunks (full time axis per
             chunk) and streamed to the NetCDF file, one Tile after another. Chunk size
@@ -245,7 +247,7 @@ class StackTilesStep(StepBase):
         top = pick[1](m.top for m in members)
         bottom = pick[0](m.bottom for m in members)
         if right - left <= 0 or top - bottom <= 0:
-            raise ValueError(f"Tile {tile}: the inputs do not overlap; use union=True to pad them.")
+            raise ValueError(f"Stack {tile}: the inputs do not overlap; use union=True to pad them.")
         lattice = Lattice(left, top, res)
         width, height = lattice.shape((left, bottom, right, top))
 
@@ -264,7 +266,7 @@ class StackTilesStep(StepBase):
                 key = (m.iso, var)
                 if key in seen:
                     raise ValueError(
-                        f"Tile {tile}: duplicate variable '{var}' at {m.iso} ({m.path.name})."
+                        f"Stack {tile}: duplicate variable '{var}' at {m.iso} ({m.path.name})."
                     )
                 seen.add(key)
                 contributions.append((band, var_index.setdefault(var, len(var_index)), time_index[bin_of(m.iso)]))

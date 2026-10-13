@@ -408,3 +408,35 @@ class TestNativeGroup:
         raw = make_raster(src_dir / "S1A_20250314T051233_x_vv.tif", 310000.0, 4890000.0)
         with pytest.raises(ValueError, match="TILE/DATETIME"):
             StackTilesStep().execute([raw], output_dir)
+
+    def test_mixed_grids_are_refused(self, src_dir, output_dir):
+        a = make_raster(src_dir / "S1A_20250314T051233_x_vv.tif", 310000.0, 4890000.0)
+        off = make_raster(src_dir / "S1A_20250326T051233_x_vv.tif", 310003.0, 4890000.0)
+        with pytest.raises(ValueError, match="not on the same lattice"):
+            StackTilesStep().execute([a, off], output_dir, group="g")
+        coarse = make_raster(src_dir / "S1A_20250402T051233_x_vv.tif", 310000.0, 4890000.0, res=20.0)
+        with pytest.raises(ValueError, match="mixed resolution"):
+            StackTilesStep().execute([a, coarse], output_dir, group="g")
+        assert list(output_dir.glob("*.nc")) == []
+
+    def test_filename_without_a_date_is_refused(self, src_dir, output_dir):
+        raw = make_raster(src_dir / "scene_vv.tif", 310000.0, 4890000.0)
+        with pytest.raises(ValueError, match="No acquisition date"):
+            StackTilesStep().execute([raw], output_dir, group="g")
+
+    def test_two_dates_in_the_name_use_the_first(self, src_dir, output_dir):
+        raw = make_raster(src_dir / "S1A_20250314T051233_20250314T051258_x_vv.tif", 310000.0, 4890000.0)
+        ds = xr.open_dataset(stack([raw], output_dir, group="g")[0])
+        assert list(ds.time.values) == [np.datetime64("2025-03-14T05:12:33")]
+
+    def test_duplicate_variable_at_a_datetime_is_refused(self, src_dir, output_dir):
+        a = make_raster(src_dir / "a_20250314T051233_vv.tif", 310000.0, 4890000.0)
+        b = make_raster(src_dir / "b_20250314T051233_vv.tif", 310000.0, 4890000.0)
+        with pytest.raises(ValueError, match="duplicate variable 'VV'"):
+            StackTilesStep().execute([a, b], output_dir, group="g")
+
+    def test_time_bin_day_combines_slices_of_one_pass(self, src_dir, output_dir):
+        a = make_raster(src_dir / "a_20250314T051208_vv.tif", 310000.0, 4890000.0, fill=np.full((1, 64, 64), 2, "float32"))
+        b = make_raster(src_dir / "b_20250314T051233_vv.tif", 310000.0, 4890000.0, fill=np.full((1, 64, 64), 6, "float32"))
+        ds = xr.open_dataset(stack([a, b], output_dir, group="g", time_bin="day")[0])
+        assert ds.sizes["time"] == 1 and float(ds.VV.mean()) == 2.0
