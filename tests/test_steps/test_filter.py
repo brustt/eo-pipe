@@ -3,7 +3,7 @@
 import numpy as np
 import rasterio as rio
 
-from eo_pipe.steps.raster.filter import FilterStep
+from eo_pipe.steps.raster.filter import FilterStep, get_filter_method
 
 
 class TestFilterStep:
@@ -71,3 +71,49 @@ class TestFilterStep:
 
     def test_step_name(self):
         assert FilterStep.name == "filter"
+
+
+class TestOtsu:
+    def test_binarises_bimodal_band(self, write_raster, output_dir):
+        data = np.full((1, 64, 64), 20, dtype=np.uint8)
+        data[:, :, 32:] = 200
+        inp = write_raster("bimodal.tif", data=data, profile={"count": 1})
+
+        result = FilterStep().execute([inp], output_dir, method="otsu").flush_all()
+
+        with rio.open(result.outputs[0]) as dst:
+            out = dst.read(1)
+        assert set(np.unique(out)) == {0, 1}
+        np.testing.assert_array_equal(out[:, :32], 0)
+        np.testing.assert_array_equal(out[:, 32:], 1)
+
+    def test_nodata_excluded_and_restored(self, write_raster, output_dir):
+        data = np.full((1, 64, 64), 20, dtype=np.uint8)
+        data[:, :, 32:] = 200
+        data[:, 0, :] = 0  # nodata row
+        inp = write_raster("nodata_otsu.tif", data=data, profile={"count": 1})
+
+        result = FilterStep().execute([inp], output_dir, method="otsu").flush_all()
+
+        with rio.open(result.outputs[0]) as dst:
+            out = dst.read(1)
+        np.testing.assert_array_equal(out[0, :], 0)
+        np.testing.assert_array_equal(out[1:, 32:], 1)
+
+    def test_constant_band_is_zero(self, write_raster, output_dir):
+        data = np.full((1, 64, 64), 100, dtype=np.uint8)
+        inp = write_raster("const.tif", data=data, profile={"count": 1})
+        result = FilterStep().execute([inp], output_dir, method="otsu").flush_all()
+        with rio.open(result.outputs[0]) as dst:
+            assert dst.read(1).max() == 0
+
+
+class TestFactory:
+    def test_returns_callable(self):
+        assert callable(get_filter_method("median"))
+        assert callable(get_filter_method("otsu"))
+
+    def test_unknown_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="not supported"):
+            get_filter_method("nope")
