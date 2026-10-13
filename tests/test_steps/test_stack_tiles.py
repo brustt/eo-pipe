@@ -386,3 +386,25 @@ class TestFailedWrite:
         with pytest.raises(Exception):
             pending.flush_all()
         assert not list(output_dir.glob("*"))
+
+
+class TestNativeGroup:
+    """``group``: raw rasters on a shared native grid are stacked without align_to_tile."""
+
+    def test_stacks_untagged_rasters_on_their_own_grid(self, src_dir, output_dir):
+        early = make_raster(src_dir / "S1A_20250314T051233_x_vv.tif", 310000.0, 4890000.0, fill=np.full((1, 64, 64), 3, "float32"))
+        late = make_raster(src_dir / "S1A_20250326T051233_x_vv.tif", 310000.0, 4890000.0, fill=np.full((1, 64, 64), 7, "float32"))
+        vh = make_raster(src_dir / "S1A_20250314T051233_x_vh.tif", 310000.0, 4890000.0, fill=np.full((1, 64, 64), 5, "float32"))
+        outs = stack([late, vh, early], output_dir, group="ro008_descending")
+        assert [p.name for p in outs] == ["stack_ro008_descending.nc"]
+        ds = xr.open_dataset(outs[0])
+        assert set(ds.data_vars) == {"VV", "VH"}
+        assert list(ds.time.values) == [np.datetime64("2025-03-14T05:12:33"), np.datetime64("2025-03-26T05:12:33")]
+        assert float(ds.VV.isel(time=0).mean()) == 3.0 and float(ds.VV.isel(time=1).mean()) == 7.0
+        assert float(ds.VH.isel(time=0).mean()) == 5.0
+        assert float(ds.x[0]) == 310005.0 and ds.attrs["tile"] == "ro008_descending"
+
+    def test_without_group_untagged_rasters_are_refused(self, src_dir, output_dir):
+        raw = make_raster(src_dir / "S1A_20250314T051233_x_vv.tif", 310000.0, 4890000.0)
+        with pytest.raises(ValueError, match="TILE/DATETIME"):
+            StackTilesStep().execute([raw], output_dir)

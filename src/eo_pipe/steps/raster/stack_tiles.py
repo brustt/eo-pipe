@@ -6,7 +6,7 @@ import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple  # noqa: UP035
 
 import dask.array as da
 import numpy as np
@@ -15,7 +15,15 @@ import rioxarray  # noqa: F401  (registers the .rio accessor)
 import xarray as xr
 from rasterio.crs import CRS
 
-from eo_pipe.io.aligned import TAG_PARAMS, identify, iso_to_datetime64
+from eo_pipe.io.aligned import (
+    DEFAULT_DATE_PATTERN,
+    TAG_PARAMS,
+    datetime_token,
+    identify,
+    iso_to_datetime64,
+    polarization_of,
+    token_to_iso,
+)
 from eo_pipe.io.lattice import Lattice
 from eo_pipe.io.memory import budget_mb, plan_chunks
 from eo_pipe.io.output_types import XarrayOutput
@@ -54,26 +62,45 @@ class _Member:
         return self.top - self.height * self.res
 
 
-def _describe(path: Path) -> _Member:
+def _describe(path: Path, group: Optional[str] = None, date_pattern: str = DEFAULT_DATE_PATTERN) -> _Member:
+    """Read a raster's header (no pixels); reject non north-up or non-square grids.
+
+    Without *group* the raster must be an Aligned raster.  With it, the raster is taken
+    on its own grid: *group* names the stack, the datetime comes from the filename
+    (*date_pattern*) and the variable from its polarization / band descriptions.
+    """
     with rio.open(path) as src:
         t = src.transform
         if t.b != 0 or t.d != 0 or t.e >= 0 or abs(t.a + t.e) > 1e-9:
             raise ValueError(f"{path.name}: expected a north-up raster with square pixels.")
-        ident = identify(path.name, dict(src.tags()), src.count, list(src.descriptions))
+        if group is None:
+            ident = identify(path.name, dict(src.tags()), src.count, list(src.descriptions))
+            tile, iso, variables, tags = ident.tile, ident.iso, ident.variables, ident.tags
+        else:
+            tile = group
+            iso = token_to_iso(datetime_token(path.stem, date_pattern))
+            pol = polarization_of(src.count, src.descriptions, path.stem)
+            variables = [pol] if pol else [d or f"band_{i}" for i, d in enumerate(src.descriptions, start=1)]
+            tags = dict(src.tags())
         return _Member(
-            path=path, tile=ident.tile, iso=ident.iso, variables=ident.variables, crs=src.crs,
+            path=path, tile=tile, iso=iso, variables=variables, crs=src.crs,
             res=t.a, left=t.c, top=t.f, width=src.width, height=src.height,
-            dtype=src.dtypes[0], nodata=src.nodata, tags=ident.tags,
+            dtype=src.dtypes[0], nodata=src.nodata, tags=tags,
         )
 
 
 def _same_nodata(a: Optional[float], b: Optional[float]) -> bool:
+    """Nodata equality that treats NaN as equal to NaN and ``None`` only as ``None``."""
     if a is None or b is None:
         return a is b
     return a == b or (math.isnan(a) and math.isnan(b))
 
 
 def _validate(tile: str, members: List[_Member]) -> None:
+    """Check the members of one Tile share CRS, nodata, dtype, resolution and lattice.
+
+    Header-only, so failures happen before any pixel is read or file written.
+    """
     ref = members[0]
     for m in members[1:]:
         if m.crs != ref.crs:
@@ -97,6 +124,7 @@ def _validate(tile: str, members: List[_Member]) -> None:
 
 
 def _nodata_mask(data: np.ndarray, nodata: Optional[float]) -> np.ndarray:
+    """Boolean mask of the cells equal to *nodata* (NaN-aware; all ``False`` if ``None``)."""
     if nodata is None:
         return np.zeros(data.shape, dtype=bool)
     return np.isnan(data) if math.isnan(nodata) else data == nodata
@@ -154,6 +182,15 @@ class StackTilesStep(StepBase):
             step (earliest datetime), e.g. consecutive slices of one pass; where
             they overlap the first valid value wins. Only combine rasters you
             already grouped (same relative orbit and orbit state).
+        group (str | None): Stack rasters that are *not* Aligned rasters, each on its own
+            native grid (no ``align_to_tile``).  All inputs form one stack named
+            ``stack_<group>.nc``; the datetime is read from the filename (``date_pattern``)
+            and the variable from the polarization (``_vv`` / ``_vh`` token) or band
+            description.  They must already share one lattice (CRS, resolution, whole-pixel
+            offsets), as repeat-pass scenes of one orbit do.  Default ``None``: Aligned
+            rasters, grouped by Tile.
+        date_pattern (str): With ``group``, regex extracting the acquisition date from the
+            filename stem. Default: first ``YYYYMMDD[THHMMSS]``.
         memory_budget_mb (float): Ceiling for the whole step, in MB. The Tile stack is
             never fully loaded: it is built lazily in spatial chunks (full time axis per
             chunk) and streamed to the NetCDF file, one Tile after another. Chunk size
@@ -164,14 +201,17 @@ class StackTilesStep(StepBase):
     name = "stack_tiles"
 
     def execute(self, inputs: List[Path], output_dir: Path, **params: Any) -> StepOutput:
+        """Validate and describe each Tile's stack; pixels are computed at flush time."""
         union = bool(params.get("union", False))
         time_bin = params.get("time_bin")
         if time_bin not in (None, "day"):
             raise ValueError(f"time_bin must be None or 'day', got {time_bin!r}.")
         budget = budget_mb(params)
+        group = params.get("group")
+        date_pattern = params.get("date_pattern", DEFAULT_DATE_PATTERN)
         groups: Dict[str, List[_Member]] = {}
         for path in inputs:
-            member = _describe(Path(path))
+            member = _describe(Path(path), group, date_pattern)
             groups.setdefault(member.tile, []).append(member)
 
         outputs: List[XarrayOutput] = []
@@ -192,8 +232,13 @@ class StackTilesStep(StepBase):
         time_bin: Optional[str],
         budget: float,
     ) -> Tuple[xr.Dataset, int]:
+        """Build the lazy, dask-backed Dataset of one Tile.
+
+        Returns the Dataset and the number of chunks the scheduler may process at once.
+        """
         ref = members[0]
         res = ref.res
+        # Intersection: tightest bounds; union: widest bounds.
         pick = (min, max) if union else (max, min)
         left = pick[0](m.left for m in members)
         right = pick[1](m.right for m in members)
@@ -205,6 +250,7 @@ class StackTilesStep(StepBase):
         width, height = lattice.shape((left, bottom, right, top))
 
         nodata = nodata_param if nodata_param is not None else (ref.nodata if ref.nodata is not None else 0)
+        # Time steps: one per datetime, or per calendar day when time_bin="day".
         bin_of = (lambda iso: iso[:10]) if time_bin == "day" else (lambda iso: iso)
         bins = sorted({bin_of(m.iso) for m in members})
         time_index = {b: i for i, b in enumerate(bins)}
@@ -248,6 +294,7 @@ class StackTilesStep(StepBase):
                 "x": left + res * (np.arange(width) + 0.5),
             },
         )
+        # Output contract: CRS as a coordinate, nodata as _FillValue and a "nodata" attr.
         ds = ds.rio.write_crs(ref.crs).rio.write_coordinate_system()
         for var in arrays:
             ds[var].encoding["_FillValue"] = nodata

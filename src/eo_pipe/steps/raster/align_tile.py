@@ -39,10 +39,12 @@ logger = setup_logger("eo_pipe.steps.raster.align_tile")
 
 
 def _aoi_geometry(aoi: Union[BaseGeometry, Sequence[float]]) -> BaseGeometry:
+    """An AOI given as a geometry or ``(minx, miny, maxx, maxy)``, as a geometry."""
     return aoi if isinstance(aoi, BaseGeometry) else box(*aoi)
 
 
 def _valid_mask(data: np.ndarray, nodata: float) -> np.ndarray:
+    """``(rows, cols)`` mask of pixels with at least one band different from *nodata* (NaN-aware)."""
     if isinstance(nodata, float) and math.isnan(nodata):
         return ~np.isnan(data).all(axis=0)
     return (data != nodata).any(axis=0)
@@ -213,6 +215,10 @@ class AlignToTileStep(StepBase):
     name = "align_to_tile"
 
     def execute(self, inputs: List[Path], output_dir: Path, **params: Any) -> StepOutput:
+        """Plan one deferred Aligned raster per (Tile, input); pixels are written at flush time.
+
+        Only reads are done here (headers and the valid-pixel count that decides skipping).
+        """
         res = float(params.get("resolution", 10.0))
         if TILE_SIZE_M % res != 0:
             raise ValueError(f"resolution {res} must divide the Tile size {TILE_SIZE_M:g} m.")
@@ -262,6 +268,7 @@ class AlignToTileStep(StepBase):
         return Lattice.of_tile(tile, opts.resolution).snap_outward(clipped) if clipped else None
 
     def _target(self, src: rio.DatasetReader, tile: Tile, opts: _Options) -> Optional[_Target]:
+        """The output grid for *src* on *tile*; ``None`` when *src* does not reach the Tile."""
         extent = self._extent(src, tile, opts)
         if extent is None:
             return None
@@ -309,6 +316,7 @@ class AlignToTileStep(StepBase):
     def _align(
         self, src: rio.DatasetReader, inp: Path, tile: Tile, token: str, output_dir: Path, opts: _Options,
     ) -> Optional[WindowedRasterOutput]:
+        """Align *src* to one *tile*; ``None`` when it is skipped (no or too few valid pixels)."""
         target = self._target(src, tile, opts)
         if target is None:
             return None
@@ -317,6 +325,7 @@ class AlignToTileStep(StepBase):
             "%s: tile %s, %dx%d px in %d window(s) of up to %d rows",
             inp.name, tile.name, target.width, target.height, len(windows), max(w.height for w in windows),
         )
+        # Read-only pass so execute() stays write-free and a skipped Tile leaves no file.
         n_valid = _count_valid(_window_producer(src, target, opts.method), windows, target.nodata, opts.min_valid_fraction)
         if n_valid == 0 or n_valid / (target.width * target.height) < opts.min_valid_fraction:
             logger.info("%s: tile %s skipped (%d valid pixels)", inp.name, tile.name, n_valid)
