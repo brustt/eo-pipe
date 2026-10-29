@@ -172,6 +172,15 @@ class StackTilesStep(StepBase):
     (``VV``, ``VH``) or band description (``band_N`` when undescribed).  No
     SAR-specific checks are made: group repeat-pass sets before calling.
 
+    Each time step is assembled pixel by pixel from the inputs binned into it: every
+    cell starts as nodata and the inputs are laid down in input order, each filling only
+    the cells still nodata where it holds a valid (non-nodata) value. Where inputs
+    overlap the first valid value in input order wins (no averaging); a cell no input
+    covers stays nodata. With ``time_bin="day"`` this pieces together the slices of one
+    pass (e.g. Sentinel-1 GRD products cut from one datatake), whose overlap strips hold
+    the same acquisition. Validity is only ``!= nodata``: unflagged edge values of an
+    earlier input still win.
+
     Parameters:
         union (bool): Pad every date to the union of extents instead of cropping
             to their intersection. Default ``False``.
