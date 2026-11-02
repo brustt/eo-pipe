@@ -90,6 +90,45 @@ class TestRasterWriter:
         assert "blockxsize" not in opts
         assert "blockysize" not in opts
 
+    def test_compress_threads_default_all_cpus(self):
+        opts = RasterWriter()._creation_options(np.dtype("uint8"))
+        assert opts["NUM_THREADS"] == "ALL_CPUS"
+
+    def test_compress_threads_explicit(self):
+        opts = RasterWriter(num_threads=3)._creation_options(np.dtype("uint8"))
+        assert opts["NUM_THREADS"] == "3"
+
+    @pytest.mark.parametrize("dtype, expected", [("float32", 3), ("uint8", 2)])
+    def test_cog_predictor_follows_dtype(self, tmp_path, monkeypatch, dtype, expected):
+        import rio_cogeo.cogeo as cogeo
+        from rasterio.crs import CRS
+        from rasterio.transform import from_bounds
+
+        seen = {}
+        monkeypatch.setattr(cogeo, "cog_translate", lambda src, dst, profile, **kw: seen.update(profile=profile, kw=kw))
+        RasterWriter(cog=True, num_threads=2).write(
+            tmp_path / "c.tif", np.ones((1, 16, 16), dtype), driver="GTiff", dtype=dtype, width=16, height=16,
+            count=1, crs=CRS.from_epsg(4326), transform=from_bounds(0, 0, 1, 1, 16, 16),
+        )
+        assert seen["profile"]["predictor"] == expected
+        assert seen["kw"]["config"]["GDAL_NUM_THREADS"] == "2"
+
+    def test_cog_predictor_explicit_override(self, tmp_path, monkeypatch):
+        import rio_cogeo.cogeo as cogeo
+
+        seen = {}
+        monkeypatch.setattr(cogeo, "cog_translate", lambda src, dst, profile, **kw: seen.update(profile=profile))
+        w = RasterWriter(cog=True, predictor=1)
+        # _to_cog reads the dtype from the file it converts
+        from rasterio.crs import CRS
+        from rasterio.transform import from_bounds
+        path = tmp_path / "c.tif"
+        with rio.open(path, "w", driver="GTiff", dtype="float32", width=8, height=8, count=1,
+                      crs=CRS.from_epsg(4326), transform=from_bounds(0, 0, 1, 1, 8, 8)) as dst:
+            dst.write(np.ones((1, 8, 8), "float32"))
+        w._to_cog(path, 0)
+        assert seen["profile"]["predictor"] == 1
+
     def test_extra_options_merged(self):
         writer = RasterWriter(extra={"INTERLEAVE": "PIXEL"})
         opts = writer._creation_options(np.dtype("uint8"))
