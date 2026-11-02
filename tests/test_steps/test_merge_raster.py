@@ -148,3 +148,43 @@ class TestMergeRasterLazy:
             assert dst.overviews(1) or dst.width <= 512
             assert dst.profile["tiled"]
             np.testing.assert_array_equal(dst.read(), _reference(inputs))
+
+    def test_only_inputs_touching_a_strip_are_open(self, write_raster, output_dir, monkeypatch):
+        from eo_pipe.steps.raster import merge as merge_mod
+
+        crs = CRS.from_epsg(4326)
+        inputs = [
+            write_raster(
+                f"v{i}.tif", data=np.full((1, 64, 64), 10 + i, np.uint8),
+                profile={"count": 1, "crs": crs, "transform": from_bounds(0, 0.64 * i, 0.64, 0.64 * (i + 1), 64, 64)},
+            )
+            for i in range(6)
+        ]
+        live, peak = set(), [0]
+        real_open = rio.open
+
+        class Tracked:
+            def __init__(self, ds):
+                self.ds = ds
+
+            def __getattr__(self, k):
+                return getattr(self.ds, k)
+
+            def __enter__(self):
+                self.ds.__enter__()
+                live.add(id(self))
+                peak[0] = max(peak[0], len(live))
+                return self
+
+            def __exit__(self, *a):
+                live.discard(id(self))
+                return self.ds.__exit__(*a)
+
+        monkeypatch.setattr(merge_mod.rio, "open", lambda p, *a, **k: Tracked(real_open(p, *a, **k)))
+        out = MergeRasterStep().execute(inputs, output_dir, to_cog=False, memory_budget_mb=0.02).flush_all().outputs[0]
+        # A 109-row strip straddles at most 3 of the 64-row inputs, plus the output being written
+        # (rio.open is patched globally); never all 6 at once.
+        assert 0 < peak[0] <= 4
+        monkeypatch.undo()
+        with rio.open(out) as dst:
+            np.testing.assert_array_equal(dst.read(), _reference(inputs))

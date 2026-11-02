@@ -1,10 +1,11 @@
 import dataclasses
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator, List, Tuple
+from typing import Any, Callable, Iterator, List
 
 import numpy as np
 import rasterio as rio
+from rasterio.coords import BoundingBox
 from rasterio.enums import Resampling
 from rasterio.merge import merge
 from rasterio.transform import from_origin
@@ -32,9 +33,10 @@ class MergeRasterStep(StepBase):
 
     Designed for use with :class:`~eo_pipe.pipeline.batch.MergeBatch` so
     that the step receives all files at once.  The mosaic is never held in
-    memory: it is produced and written full-width strip by strip, each strip
-    reading only the parts of the inputs that intersect it, so the merged
-    size and the number of inputs are bounded by disk, not RAM.  Where inputs
+    memory: it is produced and written full-width strip by strip.  Each strip
+    opens only the inputs that intersect it, and only for that strip, so the
+    merged size and the number of inputs are bounded by disk, not RAM, and
+    open file handles by the inputs one strip spans.  Where inputs
     overlap, the first input wins.  Output grid and resolution follow the
     first input; inputs must share its CRS and dtype.  Needs rasterio only.
 
@@ -76,7 +78,9 @@ class MergeRasterStep(StepBase):
             xres, yres = first.res
             nodata = params.get("nodata", first.nodata)
             count, dtype = first.count, np.dtype(first.dtypes[0])
-        left, bottom, right, top = _union_bounds(inputs)
+        boxes = _read_bounds(inputs)
+        left, bottom = min(b.left for b in boxes), min(b.bottom for b in boxes)
+        right, top = max(b.right for b in boxes), max(b.top for b in boxes)
         width = int(round((right - left) / xres))
         height = int(round((top - bottom) / yres))
 
@@ -88,26 +92,26 @@ class MergeRasterStep(StepBase):
             f"Merging {len(inputs)} rasters ({width}x{height} px) in {len(windows)} strip(s) of up to {rows} rows"
         )
 
+        fill = nodata if nodata is not None else 0
+
         @contextmanager
         def open_producer() -> Iterator[Callable[[Window], np.ndarray]]:
-            sources = [rio.open(p) for p in inputs]
-            try:
-
-                def produce(window: Window) -> np.ndarray:
-                    strip = (
-                        left, top - (window.row_off + window.height) * yres,
-                        right, top - window.row_off * yres,
-                    )
+            def produce(window: Window) -> np.ndarray:
+                south = top - (window.row_off + window.height) * yres
+                north = top - window.row_off * yres
+                # Open only the inputs this strip touches (first wins, so keep input order).
+                hit = [p for p, b in zip(inputs, boxes) if b.bottom < north and b.top > south]
+                if not hit:
+                    return np.full((count, int(window.height), width), fill, dtype=dtype)
+                with ExitStack() as stack:
+                    sources = [stack.enter_context(rio.open(p)) for p in hit]
                     data, _ = merge(
-                        sources, bounds=strip, res=(xres, yres), nodata=nodata,
+                        sources, bounds=(left, south, right, north), res=(xres, yres), nodata=nodata,
                         dtype=dtype.name, resampling=resampling, method="first",
                     )
-                    return data[:, : int(window.height), : int(window.width)]
+                return data[:, : int(window.height), : int(window.width)]
 
-                yield produce
-            finally:
-                for src in sources:
-                    src.close()
+            yield produce
 
         meta = {
             "crs": crs, "dtype": dtype.name, "count": count, "width": width, "height": height,
@@ -118,13 +122,10 @@ class MergeRasterStep(StepBase):
         )])
 
 
-def _union_bounds(paths: List[Path]) -> Tuple[float, float, float, float]:
-    """``(left, bottom, right, top)`` covering every raster in *paths*."""
+def _read_bounds(paths: List[Path]) -> List[BoundingBox]:
+    """Bounds of every raster in *paths*, in order."""
     boxes = []
     for path in paths:
         with rio.open(path) as src:
             boxes.append(src.bounds)
-    return (
-        min(b.left for b in boxes), min(b.bottom for b in boxes),
-        max(b.right for b in boxes), max(b.top for b in boxes),
-    )
+    return boxes
