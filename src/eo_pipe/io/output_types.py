@@ -429,12 +429,11 @@ class XarrayOutput:
             def write(cell: tuple[int, int]) -> None:
                 r, c = cell
                 sl = (slice(None), slice(r_off[r], r_off[r + 1]), slice(c_off[c], c_off[c + 1]))
-                with dask.config.set(scheduler="synchronous"):
-                    blocks = dask.compute(*[ds[n].data[sl] for n in names])
+                blocks = dask.compute(*[ds[n].data[sl] for n in names], scheduler="synchronous")
                 with lock:
                     for n, block in zip(names, blocks):
                         nc[n][sl] = block
 
             cells = [(int(r), int(c)) for r, c in np.argwhere(window)]
-            with ThreadPoolExecutor(max_workers=self.num_workers or 1) as pool:
+            with ThreadPoolExecutor(max_workers=self.num_workers) as pool:
                 list(pool.map(write, cells))

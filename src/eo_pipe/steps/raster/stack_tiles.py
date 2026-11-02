@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import numbers
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -228,7 +229,9 @@ class StackTilesStep(StepBase):
             raise ValueError(f"time_bin must be None or 'day', got {time_bin!r}.")
         budget = budget_mb(params)
         chunk_side = params.get("chunk_side")
-        if chunk_side is not None and (int(chunk_side) != chunk_side or chunk_side < 1):
+        if chunk_side is not None and (
+            isinstance(chunk_side, bool) or not isinstance(chunk_side, numbers.Integral) or chunk_side < 1
+        ):
             raise ValueError(f"chunk_side must be a positive integer, got {chunk_side!r}.")
         window = params.get("window")
         if window is not None:
@@ -242,6 +245,8 @@ class StackTilesStep(StepBase):
             member = _describe(Path(path), group, date_pattern)
             groups.setdefault(member.tile, []).append(member)
 
+        if window is not None and len(groups) > 1:
+            raise ValueError("window applies to one Tile's grid; stack a single Tile when passing it.")
         outputs: List[XarrayOutput] = []
         for tile in sorted(groups):
             members = groups[tile]
