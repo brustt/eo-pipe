@@ -33,13 +33,16 @@ class RasterWriter:
         predictor: Compression predictor.  ``1`` = none, ``2`` = horizontal
             differencing (integers), ``3`` = floating-point predictor.
             ``None`` auto-selects based on dtype (``2`` for int, ``3`` for float).
+            Also applies to the COG conversion.
         nodata: Nodata value written to the output.  ``None`` (default) leaves
             whatever nodata is already in the profile unchanged.  Set
             explicitly when the step introduces a specific sentinel value.
         cog: Convert the output to a Cloud-Optimised GeoTIFF after writing.
         cog_blocksize: Internal tile size for the COG.
-        num_threads: Number of threads for COG conversion.
-        overview_resampling: Resampling for COG overviews.
+        num_threads: Worker threads for multi-threaded compression, both when
+            writing the GeoTIFF and when converting it to COG: an integer or
+            ``"ALL_CPUS"`` (default).  Only compression is parallel; set a
+            small integer on shared machines or when running steps concurrently.        overview_resampling: Resampling for COG overviews.
         extra: Extra rasterio creation options merged last (overrides above).
 
     Example::
@@ -64,7 +67,7 @@ class RasterWriter:
     nodata: Optional[float] = None
     cog: bool = False
     cog_blocksize: int = 512
-    num_threads: int = 4
+    num_threads: Union[int, str] = "ALL_CPUS"
     overview_resampling: str = "nearest"
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -86,6 +89,8 @@ class RasterWriter:
 
         if self.bigtiff:
             opts["BIGTIFF"] = "YES"
+
+        opts["NUM_THREADS"] = str(self.num_threads)
 
         if self.compress != "none":
             opts["compress"] = self.compress
@@ -174,11 +179,11 @@ class RasterWriter:
         from rio_cogeo.profiles import cog_profiles
 
         cog_profile: dict[str, Any] = cog_profiles.get("deflate")  # type: ignore[no-untyped-call]
-        cog_profile.update({
-            "blocksize": self.cog_blocksize,
-            "predictor": 2,
-        })
         with rio.open(path) as src_ds:
+            cog_profile.update({
+                "blocksize": self.cog_blocksize,
+                "predictor": self._resolve_predictor(np.dtype(src_ds.dtypes[0])),
+            })
             cog_translate(
                 src_ds,
                 path,
@@ -186,6 +191,7 @@ class RasterWriter:
                 nodata=nodata,
                 in_memory=False,
                 overview_resampling=self.overview_resampling,  # type: ignore[arg-type]
+                config={"GDAL_NUM_THREADS": str(self.num_threads)},
             )
 
 
