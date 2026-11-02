@@ -440,3 +440,67 @@ class TestNativeGroup:
         b = make_raster(src_dir / "b_20250314T051233_vv.tif", 310000.0, 4890000.0, fill=np.full((1, 64, 64), 6, "float32"))
         ds = xr.open_dataset(stack([a, b], output_dir, group="g", time_bin="day")[0])
         assert ds.sizes["time"] == 1 and float(ds.VV.mean()) == 2.0
+
+
+class TestWindow:
+    """``window`` selects the chunks (at ``chunk_side``) that are computed and written."""
+
+    SIDE = 16
+
+    @pytest.fixture()
+    def series(self, src_dir, aligned_dir, tile_grid):
+        srcs = [
+            make_raster(
+                src_dir / f"s_202503{day}T051233_vv.tif", 310000.0, 4890000.0,
+                fill=np.full((1, 64, 64), day, "float32"),
+            )
+            for day in (12, 14)
+        ]
+        return align(srcs, aligned_dir, tile_grid)
+
+    @staticmethod
+    def _window(*cells):
+        w = np.zeros((4, 4), dtype=bool)
+        for r, c in cells:
+            w[r, c] = True
+        return w
+
+    def test_chunks_in_window_match_a_run_without_and_the_rest_is_fill(self, series, tmp_path):
+        full = stack(series, tmp_path / "full", chunk_side=self.SIDE)[0]
+        win = self._window((0, 1), (2, 3))
+        part = stack(series, tmp_path / "part", chunk_side=self.SIDE, window=win)[0]
+        s = self.SIDE
+        with xr.open_dataset(full, mask_and_scale=False) as a, xr.open_dataset(part, mask_and_scale=False) as b:
+            assert b.attrs["nodata"] == a.attrs["nodata"] and b.VV.attrs["nodata"] == a.VV.attrs["nodata"]
+            assert b.sizes == a.sizes
+            for r in range(4):
+                for c in range(4):
+                    got = b.VV.values[:, r * s:(r + 1) * s, c * s:(c + 1) * s]
+                    want = a.VV.values[:, r * s:(r + 1) * s, c * s:(c + 1) * s]
+                    if win[r, c]:
+                        np.testing.assert_array_equal(got, want)
+                    else:
+                        assert (got == a.attrs["nodata"]).all()
+
+    def test_file_size_scales_with_the_window(self, series, tmp_path):
+        full = stack(series, tmp_path / "full", chunk_side=self.SIDE)[0]
+        part = stack(series, tmp_path / "part", chunk_side=self.SIDE, window=self._window((1, 1)))[0]
+        assert part.stat().st_size < full.stat().st_size / 2
+
+    def test_full_window_gives_the_same_file_content(self, series, tmp_path):
+        none = stack(series, tmp_path / "none", chunk_side=self.SIDE)[0]
+        full = stack(series, tmp_path / "full", chunk_side=self.SIDE, window=np.ones((4, 4), bool))[0]
+        _assert_same_stack(none, full)
+
+    def test_wrong_window_shape_is_rejected(self, series, output_dir):
+        with pytest.raises(ValueError, match="window"):
+            StackTilesStep().execute(series, output_dir, chunk_side=self.SIDE, window=np.ones((3, 4), bool))
+
+    def test_chunk_side_alone_keeps_content(self, series, tmp_path):
+        _assert_same_stack(
+            stack(series, tmp_path / "a")[0], stack(series, tmp_path / "b", chunk_side=self.SIDE)[0]
+        )
+
+    def test_invalid_chunk_side_is_rejected(self, series, output_dir):
+        with pytest.raises(ValueError, match="chunk_side"):
+            StackTilesStep().execute(series, output_dir, chunk_side=0)

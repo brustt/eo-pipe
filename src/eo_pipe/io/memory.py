@@ -89,6 +89,22 @@ def plan_chunks(
     return ChunkPlan(side=max(side, 1), workers=workers)
 
 
+def workers_for(budget: float, bytes_per_pixel: float, side: int, max_workers: Optional[int] = None) -> int:
+    """How many ``side`` x ``side`` chunks fit *budget* MB at once (at least 1).
+
+    Raises:
+        ValueError: If not even one such chunk fits, stating the minimum budget.
+    """
+    if max_workers is None:
+        from dask.system import CPU_COUNT
+
+        max_workers = CPU_COUNT
+    one = bytes_per_pixel * OVERHEAD * side * side
+    if budget * _MB < one:
+        raise _min_budget_error(budget, one)
+    return max(1, min(max_workers, int(budget * _MB / one)))
+
+
 def plan_rows(budget: float, bytes_per_row: float) -> int:
     """Rows (at least ``MIN_CHUNK_SIDE``) of a full-width strip whose estimated peak fits *budget* MB."""
     per_row = bytes_per_row * OVERHEAD

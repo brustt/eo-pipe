@@ -372,12 +372,16 @@ class XarrayOutput:
             (dask default when ``None``).
         encoding: Extra NetCDF encoding merged into every data variable's encoding
             (e.g. ``{"zlib": True, "complevel": 1, "shuffle": True}``).  ``None`` adds nothing.
+        window: Boolean ``(row, column)`` grid over the Dataset's spatial dask chunks.  Only
+            chunks set ``True`` are computed and written; the others are never allocated on
+            disk and read back as ``_FillValue``.  ``None`` writes every chunk.
     """
 
     ds: "xr.Dataset"
     path: Path
     num_workers: Optional[int] = None
     encoding: Optional[dict[str, Any]] = None
+    window: Optional["np.ndarray"] = None
 
     def _with_chunk_encoding(self) -> "xr.Dataset":
         ds = self.ds
@@ -397,5 +401,40 @@ class XarrayOutput:
         if self.num_workers:
             config["num_workers"] = self.num_workers
         with atomic_path(self.path) as tmp, dask.config.set(config):
-            self._with_chunk_encoding().to_netcdf(tmp, engine="netcdf4")
+            if self.window is None:
+                self._with_chunk_encoding().to_netcdf(tmp, engine="netcdf4")
+            else:
+                self._flush_window(tmp)
         return self.path
+
+    def _flush_window(self, tmp: Path) -> None:
+        """Write the skeleton (coordinates, attrs, empty variables), then only the windowed chunks."""
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        import dask
+        import netCDF4
+
+        ds = self._with_chunk_encoding()
+        names = list(ds.data_vars)
+        rows, cols = ds[names[0]].chunks[-2:]
+        window = np.asarray(self.window, dtype=bool)
+        if window.shape != (len(rows), len(cols)):
+            raise ValueError(f"window shape {window.shape} does not match the chunk grid {(len(rows), len(cols))}.")
+        r_off = np.concatenate([[0], np.cumsum(rows)])
+        c_off = np.concatenate([[0], np.cumsum(cols)])
+        ds.to_netcdf(tmp, engine="netcdf4", compute=False)   # lazy: variables are created, no chunk written
+        lock = threading.Lock()
+        with netCDF4.Dataset(tmp, "r+") as nc:
+            def write(cell: tuple[int, int]) -> None:
+                r, c = cell
+                sl = (slice(None), slice(r_off[r], r_off[r + 1]), slice(c_off[c], c_off[c + 1]))
+                with dask.config.set(scheduler="synchronous"):
+                    blocks = dask.compute(*[ds[n].data[sl] for n in names])
+                with lock:
+                    for n, block in zip(names, blocks):
+                        nc[n][sl] = block
+
+            cells = [(int(r), int(c)) for r, c in np.argwhere(window)]
+            with ThreadPoolExecutor(max_workers=self.num_workers or 1) as pool:
+                list(pool.map(write, cells))

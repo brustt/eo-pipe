@@ -25,7 +25,7 @@ from eo_pipe.io.aligned import (
     token_to_iso,
 )
 from eo_pipe.io.lattice import Lattice
-from eo_pipe.io.memory import budget_mb, plan_chunks
+from eo_pipe.io.memory import ChunkPlan, budget_mb, plan_chunks, workers_for
 from eo_pipe.io.output_types import XarrayOutput
 from eo_pipe.io.path_utils import NamedPathStrategy
 from eo_pipe.logging import setup_logger
@@ -207,6 +207,15 @@ class StackTilesStep(StepBase):
             chunk) and streamed to the NetCDF file, one Tile after another. Chunk size
             and concurrency are derived from it; very long series get smaller chunks.
             Raises if not even a minimal chunk fits. Default ``4096``.
+        chunk_side (int | None): Spatial chunk side in pixels, overriding the one planned
+            from ``memory_budget_mb`` (concurrency still follows the budget). Needed to
+            build ``window``. Default: planned from the budget.
+        window (array-like of bool | None): Boolean ``(row, column)`` grid of the Cube's
+            spatial chunks at ``chunk_side`` (ceil(height / side) x ceil(width / side)).
+            Only chunks set ``True`` are computed and written; the others are not
+            allocated in the file and read back as the fill value. The Cube keeps its
+            full grid, CRS and time axis. Compute it in the Cube's CRS. Default ``None``
+            writes every chunk. Requires ``chunk_side``.
     """
 
     name = "stack_tiles"
@@ -218,6 +227,14 @@ class StackTilesStep(StepBase):
         if time_bin not in (None, "day"):
             raise ValueError(f"time_bin must be None or 'day', got {time_bin!r}.")
         budget = budget_mb(params)
+        chunk_side = params.get("chunk_side")
+        if chunk_side is not None and (int(chunk_side) != chunk_side or chunk_side < 1):
+            raise ValueError(f"chunk_side must be a positive integer, got {chunk_side!r}.")
+        window = params.get("window")
+        if window is not None:
+            if chunk_side is None:
+                raise ValueError("window requires chunk_side.")
+            window = np.asarray(window, dtype=bool)
         group = params.get("group")
         date_pattern = params.get("date_pattern", DEFAULT_DATE_PATTERN)
         groups: Dict[str, List[_Member]] = {}
@@ -229,9 +246,16 @@ class StackTilesStep(StepBase):
         for tile in sorted(groups):
             members = groups[tile]
             _validate(tile, members)
-            ds, workers = self._build(tile, members, union, params.get("nodata"), time_bin, budget)
+            ds, workers = self._build(tile, members, union, params.get("nodata"), time_bin, budget, chunk_side)
             path = NamedPathStrategy(".nc").resolve(f"stack_{tile}", Path(), 0, output_dir)
-            outputs.append(XarrayOutput(ds=ds, path=path, num_workers=workers))
+            if window is not None:
+                grid = tuple(len(c) for c in next(iter(ds.data_vars.values())).chunks[-2:])
+                if window.shape != grid:
+                    raise ValueError(
+                        f"Stack {tile}: window shape {window.shape} does not match the {grid} "
+                        f"(row, column) chunk grid at chunk_side={chunk_side}."
+                    )
+            outputs.append(XarrayOutput(ds=ds, path=path, num_workers=workers, window=window))
         return StepOutput(outputs=outputs)
 
     def _build(
@@ -242,6 +266,7 @@ class StackTilesStep(StepBase):
         nodata_param: Optional[float],
         time_bin: Optional[str],
         budget: float,
+        chunk_side: Optional[int] = None,
     ) -> Tuple[xr.Dataset, int]:
         """Build the lazy, dask-backed Dataset of one Tile.
 
@@ -283,7 +308,11 @@ class StackTilesStep(StepBase):
                 entries.append((m, contributions))
 
         dtype = np.dtype(ref.dtype)
-        plan = plan_chunks(budget, len(var_index) * len(isos) * dtype.itemsize, height, width)
+        bytes_per_pixel = len(var_index) * len(isos) * dtype.itemsize
+        if chunk_side is None:
+            plan = plan_chunks(budget, bytes_per_pixel, height, width)
+        else:
+            plan = ChunkPlan(side=int(chunk_side), workers=workers_for(budget, bytes_per_pixel, int(chunk_side)))
         logger.info(
             "Tile %s: %d dates x %d variables, %dx%d px, chunks of %d px, %d at a time",
             tile, len(isos), len(var_index), width, height, plan.side, plan.workers,
